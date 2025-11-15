@@ -7,18 +7,20 @@
     <link rel="stylesheet" href="style.css">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-        integrity="sha256-o4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-        crossorigin="">
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="anonymous">
 </head>
 <body>
     <!-- Header -->
     <header class="header">
-        <div class="header-content">
-            <button class="menu-toggle" id="menuToggle" aria-label="Abrir menú">
+        <div class="header-content" role="banner">
+            <button class="menu-toggle" id="menuToggle" aria-label="Abrir men&uacute;">
                 <i class="fas fa-bars"></i>
             </button>
-            <h1 class="header-title">Conecta FCFM</h1>
-            <button class="panic-btn" id="panicBtn" aria-label="Botón de pánico">
+            <div class="header-brand" aria-live="polite">
+                <h1 class="header-title">Conecta FCFM</h1>
+            </div>
+            <button class="panic-btn" id="panicBtn" aria-label="Bot&oacute;n de p&aacute;nico">
                 <i class="fas fa-exclamation-triangle"></i>
             </button>
         </div>
@@ -33,6 +35,7 @@
             </button>
         </div>
         <ul class="nav-menu">
+            <li><a href="/registro" data-section="registro"><i class="fas fa-id-card"></i> Registro</a></li>
             <li><a href="/inicio" data-section="home"><i class="fas fa-home"></i> Inicio</a></li>
             <li><a href="/transporte-publico" data-section="transporte-publico"><i class="fas fa-subway"></i> Transporte Público</a></li>
             <li><a href="/vehiculo" data-section="vehiculo"><i class="fas fa-car"></i> Vehículo</a></li>
@@ -48,21 +51,129 @@
 
     <!-- Main Content -->
     <main class="main-content">
+        <!-- Registro Section -->
+        <section class="section" id="registro">
+            <div class="container">
+                <div class="section-header">
+                    <h2>Registro exclusivo FCFM</h2>
+                    <p>Verificamos que sólo miembros de la facultad accedan a Conecta FCFM antes de habilitar sus viajes.</p>
+                </div>
+                <div class="registration-grid">
+                    <div class="card registration-info">
+                        <div class="card__body">
+                            <h3>Requisitos clave</h3>
+                            <p class="registration-subtitle">Sólo aceptamos correos institucionales:</p>
+                            <ul class="registration-domains">
+                                <li>@ug.uchile.cl</li>
+                                <li>@ing.uchile.cl</li>
+                                <li>@uchile.cl</li>
+                                <li>@idiem.cl</li>
+                            </ul>
+                            <div class="registration-steps">
+                                <div class="step-item">
+                                    <span class="step-index">1</span>
+                                    <p>Completa el formulario con tu información básica.</p>
+                                </div>
+                                <div class="step-item">
+                                    <span class="step-index">2</span>
+                                    <p>Recibe un código o enlace seguro en tu bandeja institucional.</p>
+                                </div>
+                                <div class="step-item">
+                                    <span class="step-index">3</span>
+                                    <p>Confirma tu cuenta y configura contactos de emergencia.</p>
+                                </div>
+                            </div>
+                            <p class="registration-note">
+                                Este flujo se activará al finalizar el MVP para permitir las pruebas internas sin fricciones.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card registration-form">
+                        <div class="card__body">
+                            <h3>Únete a la red</h3>
+                            <form id="registrationForm" autocomplete="off">
+                                <div class="form-group">
+                                    <label class="form-label" for="registrationMethod">Método de verificación</label>
+                                    <select id="registrationMethod" class="form-control" name="method" required>
+                                        <option value="codigo">Código enviado por correo</option>
+                                        <option value="enlace">Enlace seguro (válido 15 min)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" for="registrationEmail">Correo institucional</label>
+                                    <input type="email" id="registrationEmail" class="form-control" name="email" placeholder="tu.nombre@ing.uchile.cl" required>
+                                    <small class="form-hint">Verificaremos automáticamente el dominio permitido.</small>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" for="registrationUser">Nombre para mostrar</label>
+                                    <input type="text" id="registrationUser" class="form-control" name="displayName" placeholder="Ej: Camila Soto" required>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" for="registrationPassword">Contraseña segura</label>
+                                    <input type="password" id="registrationPassword" class="form-control" name="password" minlength="8" placeholder="Mínimo 8 caracteres" required>
+                                </div>
+                                <div class="form-group" id="registrationCodeGroup">
+
+                                    <label class="form-label" for="registrationCode">C��digo de confirmaci��n</label>
+
+                                    <input type="text" id="registrationCode" class="form-control" name="verificationCode" placeholder="Ingresa el c��digo recibido" maxlength="6">
+
+                                    <small class="form-hint">Si elegiste enlace seguro, este campo se completa automǭticamente.</small>
+
+                                </div>
+
+                                <div class="form-actions">
+
+                                    <button type="submit" class="btn btn--primary btn--full-width">Pre-registrarme</button>
+
+                                </div>
+
+                                <small class="form-status" id="registrationStatus"></small>
+<p class="form-disclaimer">
+                                    Al confirmar, aceptarás las políticas de seguridad y convivencia de Conecta FCFM.
+                                </p>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="status-grid config-status-grid">
+                    <div class="sync-indicator card" id="appSyncIndicator" role="status" aria-live="polite">
+                        <div class="card__body">
+                            <div class="sync-indicator__status">
+                                <span class="sync-dot" aria-hidden="true"></span>
+                                <div class="sync-copy">
+                                    <p id="syncStatusLabel">Sincronizando con el servidor...</p>
+                                    <small id="syncStatusHelper">Preparando los datos iniciales.</small>
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn--outline btn--sm" id="retrySyncBtn">
+                                <i class="fas fa-rotate-right"></i>
+                                Reintentar
+                            </button>
+                        </div>
+                    </div>
+
+                </div>
+
+                </div>
+            </div>
+        </section>
         <!-- Home Section -->
         <section class="section active" id="home">
             <div class="container">
                 <div class="welcome-card card">
                     <div class="card__body">
-                        <h2>¡Bienvenido a Conecta FCFM!</h2>
+                        <h2>&iexcl;Bienvenido a Conecta FCFM!</h2>
                         <p>Tu plataforma de transporte seguro y colaborativo para la comunidad FCFM</p>
                         <div class="user-status">
                             <div class="status-item">
                                 <i class="fas fa-users"></i>
-                                <span id="activeMembersCount">— miembros activos</span>
+                                <span id="activeMembersCount">-- miembros activos</span>
                             </div>
                             <div class="status-item">
                                 <i class="fas fa-route"></i>
-                                <span id="tripsTodayCount">— viajes hoy</span>
+                                <span id="tripsTodayCount">-- viajes hoy</span>
                             </div>
                         </div>
                     </div>
@@ -122,6 +233,12 @@
                             <option value="Micro">Micro</option>
                             <option value="A pie">A pie</option>
                         </select>
+                    </div>
+                    <div class="trip-meta-bar">
+                        <p id="publicTripsSummary" class="trip-summary" aria-live="polite">Sincronizando viajes...</p>
+                        <button type="button" class="btn btn--outline btn--sm" id="refreshPublicTripsBtn">
+                            <i class="fas fa-rotate-right"></i> Actualizar
+                        </button>
                     </div>
 
                     <div class="trips-list" id="publicTrips">
@@ -253,6 +370,12 @@
                             <option value="Motocicleta">Motocicleta</option>
                         </select>
                     </div>
+                    <div class="trip-meta-bar">
+                        <p id="vehicleTripsSummary" class="trip-summary" aria-live="polite">Sincronizando viajes...</p>
+                        <button type="button" class="btn btn--outline btn--sm" id="refreshVehicleTripsBtn">
+                            <i class="fas fa-rotate-right"></i> Actualizar
+                        </button>
+                    </div>
                     <div class="vehicle-trips" id="vehicleTrips">
                         <div class="vehicle-trip-card card">
                             <div class="card__body">
@@ -381,6 +504,7 @@
                             <textarea class="form-control" name="route" rows="3" placeholder="Describe la ruta que tomarás"></textarea>
                         </div>
 
+
                         <button type="submit" class="btn btn--primary btn--full-width">Publicar Viaje</button>
                     </form>
                 </div>
@@ -434,31 +558,36 @@
                 </div>
 
                 <div class="tab-content active" id="reportes-rutas">
-                    <div class="safety-reports">
-                        <div class="safety-report-card card">
-                            <div class="card__body">
-                                <div class="report-header">
-                                    <span class="severity-badge medium">Riesgo Medio</span>
-                                    <span class="report-time">22:30</span>
-                                </div>
-                                <h4>Estación Universidad de Chile - Salida Norte</h4>
-                                <p>Zona poco iluminada, presencia de personas sospechosas</p>
-                                <small>Reportado el 12/09/2024</small>
-                            </div>
+                    <div class="filters filters--inline">
+                        <div class="filter-group">
+                            <label class="form-label" for="reportTypeFilter">Tipo</label>
+                            <select class="form-control" id="reportTypeFilter">
+                                <option value="todos">Todos</option>
+                                <option value="unsafe_route">Ruta insegura</option>
+                                <option value="incident">Incidente</option>
+                                <option value="safe_route">Ruta segura</option>
+                            </select>
                         </div>
-
-                        <div class="safety-report-card card">
-                            <div class="card__body">
-                                <div class="report-header">
-                                    <span class="severity-badge high">Riesgo Alto</span>
-                                    <span class="report-time">19:45</span>
-                                </div>
-                                <h4>Paradero B16 frente a FCFM</h4>
-                                <p>Intento de robo a estudiante esperando micro</p>
-                                <small>Reportado el 11/09/2024</small>
-                            </div>
+                        <div class="filter-group">
+                            <label class="form-label" for="reportSeverityFilter">Riesgo</label>
+                            <select class="form-control" id="reportSeverityFilter">
+                                <option value="todos">Todos</option>
+                                <option value="low">Bajo</option>
+                                <option value="medium">Medio</option>
+                                <option value="high">Alto</option>
+                            </select>
                         </div>
                     </div>
+                    <div class="trip-meta-bar">
+                        <p id="safetyReportsSummary" class="trip-summary" aria-live="polite">Sincronizando reportes...</p>
+                        <button type="button" class="btn btn--outline btn--sm" id="refreshReportsBtn">
+                            <i class="fas fa-rotate-right"></i> Actualizar
+                        </button>
+                    </div>
+                    <div class="reports-insights" id="safetyReportsInsights">
+                        <p class="insight-empty">Analizando reportes recientes...</p>
+                    </div>
+                    <div class="safety-reports"></div>
                 </div>
 
                 <div class="tab-content" id="crear-reporte">
@@ -526,6 +655,7 @@
                                 <button class="btn btn--outline btn--sm" id="changeAvatarBtn">
                                     <i class="fas fa-camera"></i> Cambiar foto
                                 </button>
+                                <input type="file" id="profileAvatarInput" accept="image/*" hidden>
                             </div>
                             <div class="profile-summary-info">
                                 <h3 id="profileName">Usuario Demo</h3>
@@ -546,6 +676,18 @@
                                 </div>
                                 <div class="verification-status" id="verificationStatus">
                                     <i class="fas fa-circle-check"></i> Perfil verificado
+                                </div>
+                                <div class="profile-health">
+                                    <div class="profile-progress-track">
+                                        <div class="profile-progress-fill" id="profileProgressBar">
+                                            <span id="profileProgressValue">0%</span>
+                                        </div>
+                                    </div>
+                                    <small id="profileProgressLabel" class="profile-progress-label">Completa tu perfil para mejorar la confianza.</small>
+                                    <ul id="profileMissingFields" class="profile-missing-list">
+                                        <li class="all-good">Perfil completo</li>
+                                    </ul>
+                                    <small class="profile-updated" id="profileUpdatedAt">Actualizado hace instantes</small>
                                 </div>
                             </div>
                         </div>
@@ -578,6 +720,7 @@
                                 <div class="form-actions">
                                     <button type="submit" class="btn btn--primary">Guardar cambios</button>
                                 </div>
+                                <small id="profileFormStatus" class="form-status"></small>
                             </form>
                         </div>
                     </div>
@@ -600,8 +743,19 @@
                 <div class="chat-layout">
                     <div class="chat-panel card">
                         <div class="card__body">
+                            <div class="chat-toolbar">
+                                <div class="chat-status is-idle" id="chatStatusPill" role="status" aria-live="polite">
+                                    <span id="chatStatusText">Selecciona un viaje para cargar el chat</span>
+                                    <small id="chatStatusTime">Última sincronización: nunca</small>
+                                </div>
+                                <div class="chat-toolbar-actions">
+                                    <button type="button" class="btn btn--outline btn--sm" id="chatRefreshBtn" disabled>
+                                        <i class="fas fa-rotate-right"></i> Actualizar
+                                    </button>
+                                </div>
+                            </div>
                             <div class="message-list" id="chatMessageList">
-                                <p class="activity-empty">No hay mensajes todavía.</p>
+                                <p class="activity-empty">Selecciona un viaje activo para iniciar la conversación.</p>
                             </div>
                             <form id="chatMessageForm" class="chat-input">
                                 <input type="text" id="chatMessageInput" class="form-control" placeholder="Escribe un mensaje..." autocomplete="off">
@@ -620,7 +774,6 @@
                 </div>
             </div>
         </section>
-
         <!-- Configuración Section -->
         <section class="section" id="configuracion">
             <div class="container">
@@ -631,12 +784,27 @@
                 <div class="settings-sections">
                     <div class="card">
                         <div class="card__body">
-                            <h4>Apariencia</h4>
+                            <h4>Apariencia e idioma</h4>
                             <div class="setting-item">
-                                <label class="setting-label">
-                                    <span>Modo Oscuro</span>
+                                <label class="setting-label" for="darkModeToggle">
+                                    <div>
+                                        <span>Modo oscuro</span>
+                                        <small class="setting-helper">Reduce el brillo para viajes nocturnos.</small>
+                                    </div>
                                     <div class="toggle-switch">
                                         <input type="checkbox" id="darkModeToggle">
+                                        <span class="slider"></span>
+                                    </div>
+                                </label>
+                            </div>
+                            <div class="setting-item">
+                                <label class="setting-label" for="languageToggle">
+                                    <div>
+                                        <span>Interfaz en inglés</span>
+                                        <small class="setting-helper" id="languageStatus">Mostrando contenido en español.</small>
+                                    </div>
+                                    <div class="toggle-switch">
+                                        <input type="checkbox" id="languageToggle">
                                         <span class="slider"></span>
                                     </div>
                                 </label>
@@ -646,10 +814,51 @@
 
                     <div class="card">
                         <div class="card__body">
-                            <h4>Seguridad</h4>
+                            <h4>Botón de pánico y seguridad</h4>
                             <div class="setting-item">
-                                <label class="form-label">Contacto de Emergencia</label>
-                                <input type="tel" class="form-control" placeholder="+56 9 XXXX XXXX">
+                                <label class="setting-label" for="panicSoundToggle">
+                                    <div>
+                                        <span>Alerta sonora</span>
+                                        <small class="setting-helper">Activa un tono cuando inicies la cuenta regresiva.</small>
+                                    </div>
+                                    <div class="toggle-switch">
+                                        <input type="checkbox" id="panicSoundToggle">
+                                        <span class="slider"></span>
+                                    </div>
+                                </label>
+                            </div>
+                            <p class="setting-helper">Selecciona quién recibe la alerta:</p>
+                            <div class="panic-routing" role="group" aria-label="Destinatarios del botón de pánico">
+                                <label class="setting-checkbox">
+                                    <input type="checkbox" id="panicCarabinerosToggle">
+                                    <span>Carabineros</span>
+                                </label>
+                                <label class="setting-checkbox">
+                                    <input type="checkbox" id="panicMunicipalToggle">
+                                    <span>Guardia municipal</span>
+                                </label>
+                                <label class="setting-checkbox">
+                                    <input type="checkbox" id="panicCivilToggle">
+                                    <span>Guardia civil</span>
+                                </label>
+                                <label class="setting-checkbox">
+                                    <input type="checkbox" id="panicContactsToggle">
+                                    <span>Contactos personales</span>
+                                </label>
+                                <label class="setting-checkbox">
+                                    <input type="checkbox" id="panicCommunityToggle">
+                                    <span>Usuarios Conecta</span>
+                                </label>
+                            </div>
+                            <p class="setting-helper" id="panicRecipientsSummary">Selecciona al menos un destinatario para la alerta.</p>
+                            <div class="setting-item stack">
+                                <div>
+                                    <span>Contacto principal</span>
+                                    <small class="setting-helper" id="panicContactInfo">Sincroniza tu teléfono desde Perfil.</small>
+                                </div>
+                                <button type="button" class="btn btn--outline btn--sm" id="editEmergencyProfileBtn">
+                                    <i class="fas fa-user-edit"></i> Editar en Perfil
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -677,6 +886,56 @@
             </div>
         </section>
     </main>
+
+    <nav class="mobile-nav" id="mobileNav" aria-label="Navegaci&oacute;n r&aacute;pida">
+        <button class="mobile-nav__btn active" data-section="home" aria-label="Ir a Inicio">
+            <i class="fas fa-home"></i>
+            <span>Inicio</span>
+        </button>
+        <button class="mobile-nav__btn" data-section="transporte-publico" aria-label="Transporte p&uacute;blico">
+            <i class="fas fa-subway"></i>
+            <span>TP&uacute;blico</span>
+        </button>
+        <button class="mobile-nav__btn" data-section="vehiculo" aria-label="Viajes en veh&iacute;culo">
+            <i class="fas fa-car"></i>
+            <span>Veh&iacute;culo</span>
+        </button>
+        <button class="mobile-nav__btn" data-section="mis-viajes" aria-label="Mis viajes">
+            <i class="fas fa-route"></i>
+            <span>Mis viajes</span>
+        </button>
+        <button class="mobile-nav__btn" data-section="rutas" aria-label="Reportes de rutas">
+            <i class="fas fa-shield-alt"></i>
+            <span>Rutas</span>
+        </button>
+    </nav>
+
+    <!-- Footer -->
+    <footer class="site-footer">
+        <div class="footer-content container">
+            <div class="footer-brand">
+                <h3>Conecta FCFM</h3>
+                <p>Red de movilidad y seguridad creada por y para la comunidad de la Facultad de Ciencias Físicas y Matemáticas.</p>
+            </div>
+            <div class="footer-links">
+                <a href="https://www.ing.uchile.cl" target="_blank" rel="noopener noreferrer">
+                    <i class="fas fa-globe"></i> Portal FCFM
+                </a>
+                <a href="mailto:seguridad@conecta.cl">
+                    <i class="fas fa-envelope"></i> seguridad@conecta.cl
+                </a>
+                <div class="footer-social">
+                    <a href="#" aria-label="Instagram Conecta"><i class="fab fa-instagram"></i></a>
+                    <a href="#" aria-label="LinkedIn Conecta"><i class="fab fa-linkedin"></i></a>
+                    <a href="#" aria-label="Twitter Conecta"><i class="fab fa-x-twitter"></i></a>
+                </div>
+            </div>
+            <div class="footer-legal">
+                <p>© <span id="footerYear"></span> Conecta FCFM. Todos los derechos reservados.</p>
+                <p class="legal-disclaimer">Prototipo interno: la información mostrada es demostrativa y puede cambiar antes del lanzamiento.</p>
+            </div>
+        </div>
+    </footer>
 
     <!-- Panic Modal -->
     <!-- Trip Detail Modal -->
@@ -711,6 +970,18 @@
                     <button class="btn btn--primary" id="tripDetailJoinBtn">Unirse al viaje</button>
                     <button class="btn btn--secondary" id="tripDetailCloseAction">Cerrar</button>
                 </div>
+        </div>
+    </div>
+
+    <div class="drawer hidden" id="panicHistoryDrawer" aria-live="polite">
+        <div class="drawer__header">
+            <h3>Historial de alertas</h3>
+            <button class="close-modal" id="closePanicHistoryBtn" aria-label="Cerrar historial">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="drawer__content" id="panicHistoryList">
+            <p class="drawer-empty">Sin registros recientes.</p>
         </div>
     </div>
 
@@ -752,9 +1023,42 @@
         </div>
     </div>
 
+    <div class="modal hidden" id="tripFeedbackModal">
+        <div class="modal-content feedback-modal">
+            <button class="close-modal" id="closeFeedbackModalBtn" aria-label="Cerrar feedback">
+                <i class="fas fa-times"></i>
+            </button>
+            <div class="modal-header">
+                <h3>Evaluar viaje</h3>
+                <p id="feedbackModalSubtitle">Comparte cómo resultó el trayecto para fortalecer la confianza.</p>
+            </div>
+            <form id="tripFeedbackForm">
+                <input type="hidden" name="userTripId" id="feedbackTripId">
+                <div class="form-group">
+                    <label class="form-label" for="feedbackRating">Calificación general</label>
+                    <input type="range" min="1" max="5" step="1" id="feedbackRating" name="rating" value="5">
+                    <div class="feedback-scale">
+                        <span>Malo</span>
+                        <span>Excelente</span>
+                    </div>
+                    <p class="feedback-rating-value"><span id="feedbackRatingValue">5</span> / 5</p>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="feedbackDonation">Donación entregada (CLP)</label>
+                    <input type="number" class="form-control" id="feedbackDonation" name="donation" min="0" placeholder="1500">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="feedbackNotes">Comentarios</label>
+                    <textarea class="form-control" id="feedbackNotes" name="notes" rows="3" placeholder="¿Algo que debamos saber?"></textarea>
+                </div>
+                <button type="submit" class="btn btn--primary btn--full-width">Enviar feedback</button>
+            </form>
+        </div>
+    </div>
+
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-        integrity="sha256-2080Chn5y0Ooic0XUWrpNvn1Uz6Q2LKc1eVL1tGWQag="
-        crossorigin=""></script>
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+        crossorigin="anonymous"></script>
     <script src="app.js"></script>
 </body>
 </html>

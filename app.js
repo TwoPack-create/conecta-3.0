@@ -181,8 +181,12 @@ const appData = {
       description: "Estación U. de Chile - Salida Norte",
       timestamp: new Date(Date.now() - 55 * 60 * 1000).toISOString()
     }
-  ]
+  ],
+  panicAlerts: [],
+  registrations: []
 };
+
+hydrateProfileFromStorage();
 
 // Global variables
 let currentSection = 'home';
@@ -199,7 +203,31 @@ const routeMap = {
   configuracion: '/configuracion',
   chat: '/chat'
 };
+const REGISTRATION_ALLOWED_DOMAINS = [
+  'ug.uchile.cl',
+  'ing.uchile.cl',
+  'uchile.cl',
+  'idiem.cl',
+  'fcfm.uchile.cl'
+];
+const PUBLIC_TRIPS_PAGE_SIZE = 12;
+const VEHICLE_TRIPS_PAGE_SIZE = 12;
+const SAFETY_REPORTS_PAGE_SIZE = 20;
 const pathToSectionMap = buildPathToSection(routeMap);
+const SYNC_STATUS_COPY = {
+  online: {
+    label: 'Servidor en linea',
+    helper: 'Datos sincronizados correctamente.'
+  },
+  offline: {
+    label: 'Sin conexion con el servidor',
+    helper: 'Mostrando datos temporales.'
+  },
+  syncing: {
+    label: 'Sincronizando con el servidor...',
+    helper: 'Preparando los datos iniciales.'
+  }
+};
 const userTrips = {
   active: [],
   completed: []
@@ -221,11 +249,80 @@ let currentDetailContext = null;
 let panicTimerId = null;
 let panicSecondsRemaining = PANIC_COUNTDOWN_SECONDS;
 let panicAlertActive = false;
+let panicAudioContext = null;
+let rootDataLoading = false;
+let lastBackendSync = null;
 let lifecycleIntervalId = null;
 let currentCompletedTrip = null;
 let currentChatTrip = null;
+let chatLoading = false;
+let profileSyncState = { status: 'idle', updatedAt: null, error: null };
+let panicHistoryOpen = false;
+const chatMessagesCache = {};
+const CHAT_POLLING_INTERVAL_MS = 15000;
+let chatPollingIntervalId = null;
+let chatSyncState = {
+  status: 'idle',
+  updatedAt: null,
+  error: null
+};
+let publicTripsMeta = {
+  total: (appData.publicTransportTrips || []).length,
+  filters: { mode: null },
+  generatedAt: new Date().toISOString()
+};
+let publicTripsFilters = { mode: '', page: 1 };
+let publicTripsRequestId = 0;
+let publicTripsLoading = false;
+let vehicleTripsMeta = {
+  total: (appData.vehicleTrips || []).length,
+  filters: { type: null },
+  generatedAt: new Date().toISOString()
+};
+let vehicleTripsFilters = { type: 'todos', page: 1 };
+let vehicleTripsRequestId = 0;
+let vehicleTripsLoading = false;
+let safetyReportsMeta = {
+  total: (appData.safetyReports || []).length,
+  filters: { type: null, severity: null },
+  generatedAt: new Date().toISOString()
+};
+let safetyReportsFilters = { type: 'todos', severity: 'todos', page: 1 };
+let safetyReportsRequestId = 0;
+let safetyReportsLoading = false;
+let panicAlertsMeta = {
+  total: (appData.panicAlerts || []).length,
+  generatedAt: new Date().toISOString()
+};
+let panicAlertsLoading = false;
+let panicLocationCache = null;
+let panicLocationRequestedAt = null;
+let userTripsLoaded = false;
+let currentFeedbackTripId = null;
 const REPORT_VOTE_STORAGE_KEY = 'conecta-route-votes';
+const USER_PROFILE_STORAGE_KEY = 'conecta-profile';
+const USER_PREFERENCES_STORAGE_KEY = 'conecta-settings';
+const PROFILE_REQUIRED_FIELDS = {
+  phone: 'Teléfono',
+  emergency_contacts: 'Contactos de emergencia',
+  description: 'Descripción',
+  bank_details: 'Datos bancarios'
+};
 let userReportVotes = loadStoredReportVotes();
+let userPreferences = loadUserPreferences();
+applyUserPreferences({ skipUi: true });
+const reportVoteInFlight = {};
+const SAFETY_REPORT_TYPE_INFO = {
+  unsafe_route: { label: 'Ruta insegura', icon: 'fas fa-triangle-exclamation' },
+  incident: { label: 'Incidente', icon: 'fas fa-bolt' },
+  safe_route: { label: 'Ruta segura', icon: 'fas fa-shield-halved' },
+  default: { label: 'Reporte', icon: 'fas fa-shield-alt' }
+};
+const SEVERITY_INFO = {
+  high: { label: 'Riesgo Alto', className: 'high', weight: 3 },
+  medium: { label: 'Riesgo Medio', className: 'medium', weight: 2 },
+  low: { label: 'Riesgo Bajo', className: 'low', weight: 1 }
+};
 
 function normalizeText(value = '') {
   return value
@@ -260,6 +357,136 @@ function persistReportVotes() {
   }
 }
 
+function loadStoredProfileData() {
+  if (typeof window === 'undefined' || !window.localStorage) return null;
+  try {
+    const raw = window.localStorage.getItem(USER_PROFILE_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    console.warn('No se pudo cargar el perfil guardado:', error);
+    return null;
+  }
+}
+
+function saveProfileToStorage(profile = {}) {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const payload = {
+      name: profile.name,
+      email: profile.email,
+      phone: profile.phone,
+      emergency_contacts: profile.emergency_contacts,
+      description: profile.description,
+      bank_details: profile.bank_details,
+      photo: profile.photo,
+      profileUpdatedAt: profile.profileUpdatedAt
+    };
+    window.localStorage.setItem(USER_PROFILE_STORAGE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn('No se pudo guardar el perfil:', error);
+  }
+}
+
+function hydrateProfileFromStorage() {
+  if (!appData.users || !appData.users.length) return;
+  const stored = loadStoredProfileData();
+  if (stored) {
+    appData.users[0] = { ...appData.users[0], ...stored };
+  }
+  if (!appData.users[0].profileUpdatedAt) {
+    appData.users[0].profileUpdatedAt = new Date().toISOString();
+  }
+  syncEmergencyContactsFromUser(appData.users[0]);
+}
+
+function syncEmergencyContactsFromUser(user) {
+  if (!user) return;
+  const parsed = parseEmergencyContacts(user.emergency_contacts || '');
+  appData.emergencyContacts = parsed.length ? parsed : [];
+}
+
+function parseEmergencyContacts(raw = '') {
+  if (!raw) return [];
+  return raw
+    .split(/\n|;/)
+    .map(entry => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const match = entry.match(/(.+?)\s*\((.+)\)/);
+      if (match) {
+        return { name: match[1].trim(), phone: match[2].trim() };
+      }
+      return { name: entry, phone: '' };
+    });
+}
+
+function loadUserPreferences() {
+  const defaults = {
+    theme: 'light',
+    language: 'es',
+    panic: {
+      sound: true,
+      recipients: {
+        carabineros: true,
+        guardiaMunicipal: true,
+        guardiaCivil: false,
+        contacts: true,
+        community: true
+      }
+    }
+  };
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return defaults;
+  }
+  try {
+    const raw = window.localStorage.getItem(USER_PREFERENCES_STORAGE_KEY);
+    const stored = raw ? JSON.parse(raw) : {};
+    const merged = {
+      ...defaults,
+      ...stored,
+      panic: {
+        ...defaults.panic,
+        ...(stored?.panic || {}),
+        recipients: {
+          ...defaults.panic.recipients,
+          ...(stored?.panic?.recipients || {})
+        }
+      }
+    };
+    if (!stored?.theme) {
+      const legacyTheme = window.localStorage.getItem('theme');
+      if (legacyTheme) {
+        merged.theme = legacyTheme;
+      }
+    }
+    return merged;
+  } catch (error) {
+    console.warn('No se pudieron cargar las preferencias:', error);
+    return defaults;
+  }
+}
+
+function persistUserPreferences() {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(USER_PREFERENCES_STORAGE_KEY, JSON.stringify(userPreferences));
+    window.localStorage.setItem('theme', userPreferences.theme || 'light');
+  } catch (error) {
+    console.warn('No se pudieron guardar las preferencias:', error);
+  }
+}
+
+function applyUserPreferences(options = {}) {
+  const theme = userPreferences.theme || 'light';
+  const language = userPreferences.language || 'es';
+  document.documentElement.setAttribute('data-color-scheme', theme);
+  document.documentElement.setAttribute('lang', language);
+  if (options.skipUi) return;
+  updatePanicContacts();
+  renderSettingsPanel();
+  renderPanicAlertCard();
+}
+
 // Initialize app when DOM is loaded
 document.addEventListener('DOMContentLoaded', function() {
   console.log('DOM loaded, initializing app...');
@@ -271,6 +498,7 @@ window.addEventListener('popstate', handlePopState);
 async function initializeApp() {
   try {
     initializeNavigation();
+    initializeStatusControls();
     initializeDarkMode();
     initializeForms();
     initializeStarRating();
@@ -278,6 +506,7 @@ async function initializeApp() {
     populateMetroLines();
     initializeChatEvents();
     renderInitialData();
+    applyUserPreferences();
     handleInitialRoute();
     await loadInitialData();
     startTripLifecycleWatcher();
@@ -287,6 +516,34 @@ async function initializeApp() {
   } catch (error) {
     console.error('Error initializing app:', error);
   }
+}
+
+function initializeChatEvents() {
+  const chatBackBtn = document.getElementById('chatBackBtn');
+  if (chatBackBtn) {
+    chatBackBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      navigateToSection('mis-viajes');
+    });
+  }
+
+  const chatMessageForm = document.getElementById('chatMessageForm');
+  if (chatMessageForm) {
+    chatMessageForm.addEventListener('submit', function(e) {
+      e.preventDefault();
+      handleChatMessageSubmit();
+    });
+  }
+
+  const chatRefreshBtn = document.getElementById('chatRefreshBtn');
+  if (chatRefreshBtn) {
+    chatRefreshBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      refreshChatMessages();
+    });
+  }
+
+  renderChatStatus();
 }
 
 function initializeMaps() {
@@ -421,21 +678,6 @@ function initializeDetailEvents() {
     });
   }
 
-  const chatBackBtn = document.getElementById('chatBackBtn');
-  if (chatBackBtn) {
-    chatBackBtn.addEventListener('click', function(e) {
-      e.preventDefault();
-      navigateToSection('mis-viajes');
-    });
-  }
-
-  const chatMessageForm = document.getElementById('chatMessageForm');
-  if (chatMessageForm) {
-    chatMessageForm.addEventListener('submit', function(e) {
-      e.preventDefault();
-      handleChatMessageSubmit();
-    });
-  }
 }
 
 async function calculateVehicleFormRoute() {
@@ -501,36 +743,185 @@ async function calculateVehicleFormRoute() {
 async function loadInitialData() {
   if (!window.fetch) {
     console.warn('Fetch API no disponible, se mantiene data local.');
+    setBackendAvailability(false, {
+      force: true,
+      helper: 'Tu navegador no soporta las peticiones necesarias.'
+    });
     return;
   }
 
+  if (rootDataLoading) {
+    console.info('Ya existe una sincronizacion en curso.');
+    return;
+  }
+
+  rootDataLoading = true;
+  updateSyncIndicator('syncing');
+
   try {
-    const [publicTrips, vehicleTrips, safetyReports] = await Promise.all([
-      apiGet('/public-trips'),
-      apiGet('/vehicle-trips'),
-      apiGet('/safety-reports')
+    const [
+      publicTripsResponse,
+      vehicleTripsResponse,
+      safetyReportsResponse,
+      userTripsResponse,
+      panicAlertsResponse,
+      profileResponse
+    ] = await Promise.all([
+      fetchPublicTripsFromApi({ limit: PUBLIC_TRIPS_PAGE_SIZE }),
+      fetchVehicleTripsFromApi({ limit: VEHICLE_TRIPS_PAGE_SIZE }),
+      fetchSafetyReportsFromApi({ limit: SAFETY_REPORTS_PAGE_SIZE }),
+      fetchUserTripsFromApi(),
+      fetchPanicAlertsFromApi({ limit: 10 }),
+      fetchUserProfileFromApi()
     ]);
 
-    if (Array.isArray(publicTrips)) {
+    const publicTrips = extractArrayResponse(publicTripsResponse);
+    if (publicTrips.length) {
       appData.publicTransportTrips = publicTrips;
-    }
-    if (Array.isArray(vehicleTrips)) {
-      appData.vehicleTrips = vehicleTrips;
-    }
-    if (Array.isArray(safetyReports)) {
-      appData.safetyReports = safetyReports;
+      publicTripsMeta = {
+        total: publicTripsResponse.meta?.total ?? publicTrips.length,
+        filters: publicTripsResponse.meta?.filters || { mode: null },
+        generatedAt: publicTripsResponse.meta?.generatedAt || new Date().toISOString()
+      };
     }
 
-    backendAvailable = true;
+    const vehicleTrips = extractArrayResponse(vehicleTripsResponse);
+    if (vehicleTrips.length) {
+      appData.vehicleTrips = vehicleTrips;
+      vehicleTripsMeta = {
+        total: vehicleTripsResponse.meta?.total ?? vehicleTrips.length,
+        filters: vehicleTripsResponse.meta?.filters || { type: 'todos' },
+        generatedAt: vehicleTripsResponse.meta?.generatedAt || new Date().toISOString()
+      };
+    }
+
+    const safetyReports = extractArrayResponse(safetyReportsResponse);
+    if (safetyReports.length) {
+      appData.safetyReports = safetyReports;
+      safetyReportsMeta = {
+        total: safetyReportsResponse.meta?.total ?? safetyReports.length,
+        filters: safetyReportsResponse.meta?.filters || { type: null, severity: null },
+        generatedAt: safetyReportsResponse.meta?.generatedAt || new Date().toISOString()
+      };
+    }
+
+    if (userTripsResponse && typeof userTripsResponse === 'object') {
+      hydrateUserTrips(userTripsResponse);
+    } else {
+      userTripsLoaded = true;
+    }
+
+    const panicAlerts = extractArrayResponse(panicAlertsResponse);
+    if (panicAlerts.length) {
+      appData.panicAlerts = panicAlerts;
+      panicAlertsMeta = {
+        total: panicAlertsResponse.meta?.total ?? panicAlerts.length,
+        generatedAt: panicAlertsResponse.meta?.generatedAt || new Date().toISOString()
+      };
+    }
+
+    if (profileResponse && profileResponse.data) {
+      mergeProfileFromApi(profileResponse.data);
+      setProfileSyncState({ status: 'online', updatedAt: new Date().toISOString() });
+    } else {
+      setProfileSyncState({ status: backendAvailable ? 'idle' : 'offline' });
+    }
+
+    setBackendAvailability(true, {
+      force: true,
+      timestamp: new Date().toISOString()
+    });
     renderInitialData();
+    applyUserPreferences();
     renderHomeStats();
+    updatePublicTripsSummary();
+    updateVehicleTripsSummary();
+    updateSafetyReportsSummary();
+    renderPanicAlertCard();
+    renderPanicHistory();
+    renderCommunityPulse();
   } catch (error) {
-    backendAvailable = false;
-    console.warn('No se pudo cargar información desde el backend:', error);
+    setBackendAvailability(false, {
+      helper: 'Servidor no disponible, mostrando datos demo.'
+    });
+    console.warn('No se pudo cargar informacion desde el backend:', error);
     showNotification('Servidor no disponible, mostrando datos demo.', 'warning');
+    updatePublicTripsSummary();
+    updateVehicleTripsSummary();
+    updateSafetyReportsSummary();
     renderHomeStats();
+    applyUserPreferences();
+    userTripsLoaded = true;
+    renderPanicAlertCard();
+    renderPanicHistory();
+    renderCommunityPulse();
+  } finally {
+    rootDataLoading = false;
   }
 }
+
+async function retryBackendSync() {
+  if (rootDataLoading) {
+    showNotification('Ya estamos sincronizando datos.', 'info');
+    return;
+  }
+  showNotification('Reintentando sincronizacion con el servidor...', 'info');
+  await loadInitialData();
+}
+
+function setBackendAvailability(isAvailable, options = {}) {
+  const nextState = Boolean(isAvailable);
+  const previousState = backendAvailable;
+  backendAvailable = nextState;
+
+  if (nextState) {
+    lastBackendSync = options.timestamp || new Date().toISOString();
+  }
+
+  const shouldUpdateIndicator =
+    options.force || previousState !== nextState || (nextState && options.timestamp);
+
+  if (shouldUpdateIndicator) {
+    updateSyncIndicator(nextState ? 'online' : 'offline', {
+      helper: options.helper,
+      timestamp: lastBackendSync
+    });
+  }
+}
+
+function updateSyncIndicator(state = 'online', options = {}) {
+  const indicator = document.getElementById('appSyncIndicator');
+  if (!indicator) return;
+
+  indicator.classList.remove('is-online', 'is-offline', 'is-syncing');
+  indicator.classList.add('is-' + state);
+
+  const copy = SYNC_STATUS_COPY[state] || {};
+  const labelEl = document.getElementById('syncStatusLabel');
+  const helperEl = document.getElementById('syncStatusHelper');
+  const retryBtn = document.getElementById('retrySyncBtn');
+
+  if (labelEl) {
+    labelEl.textContent = options.label || copy.label || '';
+  }
+
+  if (helperEl) {
+    let helperText = options.helper || copy.helper || '';
+    if (!options.helper && state === 'online' && options.timestamp) {
+      helperText = 'Actualizado ' + formatRelativeTime(options.timestamp);
+    }
+    helperEl.textContent = helperText;
+  }
+
+  if (retryBtn) {
+    const disableRetry = state === 'online' || state === 'syncing';
+    retryBtn.disabled = disableRetry;
+    retryBtn.classList.toggle('is-loading', state === 'syncing');
+    retryBtn.setAttribute('aria-busy', state === 'syncing');
+  }
+}
+
+
 
 async function apiGet(path) {
   return apiRequest(path, { method: 'GET' });
@@ -546,29 +937,156 @@ async function apiPost(path, payload) {
   });
 }
 
+async function apiPatch(path, payload) {
+  return apiRequest(path, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+}
+
 async function apiRequest(path, options = {}) {
   const endpoint = `${API_BASE_URL}${path}`;
-  const response = await fetch(endpoint, options);
+  try {
+    const response = await fetch(endpoint, options);
 
-  if (!response.ok) {
-    let errorMessage = `Error ${response.status}`;
-    try {
-      const errorBody = await response.json();
-      if (errorBody?.message) {
-        errorMessage = errorBody.message;
+    if (!response.ok) {
+      let errorMessage = `Error ${response.status}`;
+      try {
+        const errorBody = await response.json();
+        if (errorBody?.message) {
+          errorMessage = errorBody.message;
+        }
+      } catch (_) {
+        // ignore JSON parse errors
       }
-    } catch (_) {
-      // ignore JSON parse errors
+
+      if (response.status >= 500) {
+        setBackendAvailability(false, {
+          helper: 'Servicio temporalmente sin respuesta.'
+        });
+      }
+
+      throw new Error(errorMessage);
     }
 
-    throw new Error(errorMessage);
-  }
+    setBackendAvailability(true, { timestamp: new Date().toISOString() });
 
-  if (response.status === 204) {
-    return null;
-  }
+    if (response.status === 204) {
+      return null;
+    }
 
-  return response.json();
+    return response.json();
+  } catch (error) {
+    if (error instanceof TypeError || /Failed to fetch/i.test(error.message || '')) {
+      setBackendAvailability(false, {
+        helper: 'No se pudo contactar al servidor, usando datos locales.'
+      });
+    }
+    throw error;
+  }
+}
+
+function normalizeApiListResponse(payload) {
+  if (!payload) {
+    return { data: [], meta: {} };
+  }
+  if (Array.isArray(payload)) {
+    return { data: payload, meta: {} };
+  }
+  if (Array.isArray(payload.data)) {
+    return { data: payload.data, meta: payload.meta || {} };
+  }
+  return { data: [], meta: payload.meta || {} };
+}
+
+function extractArrayResponse(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.data)) {
+    return payload.data;
+  }
+  return [];
+}
+
+function buildQueryString(params = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '' || Number.isNaN(value)) {
+      return;
+    }
+    query.append(key, value);
+  });
+  const serialized = query.toString();
+  return serialized ? `?${serialized}` : '';
+}
+
+async function fetchPublicTripsFromApi(params = {}) {
+  const queryParams = {
+    limit: params.limit || PUBLIC_TRIPS_PAGE_SIZE,
+    page: params.page || publicTripsFilters.page || 1
+  };
+  if (params.mode) {
+    queryParams.mode = params.mode;
+  }
+  if (params.date) {
+    queryParams.date = params.date;
+  }
+  const response = await apiGet(`/public-trips${buildQueryString(queryParams)}`);
+  return normalizeApiListResponse(response);
+}
+
+async function fetchVehicleTripsFromApi(params = {}) {
+  const queryParams = {
+    limit: params.limit || VEHICLE_TRIPS_PAGE_SIZE,
+    page: params.page || vehicleTripsFilters.page || 1
+  };
+  if (params.type) queryParams.type = params.type;
+  if (params.seatsMin) queryParams.seatsMin = params.seatsMin;
+  if (params.donationMax) queryParams.donationMax = params.donationMax;
+  if (params.date) queryParams.date = params.date;
+  const response = await apiGet(`/vehicle-trips${buildQueryString(queryParams)}`);
+  return normalizeApiListResponse(response);
+}
+
+async function fetchSafetyReportsFromApi(params = {}) {
+  const queryParams = {
+    limit: params.limit || SAFETY_REPORTS_PAGE_SIZE,
+    page: params.page || safetyReportsFilters.page || 1
+  };
+  if (params.type && params.type !== 'todos') {
+    queryParams.type = params.type;
+  }
+  if (params.severity && params.severity !== 'todos') {
+    queryParams.severity = params.severity;
+  }
+  const response = await apiGet(`/safety-reports${buildQueryString(queryParams)}`);
+  return normalizeApiListResponse(response);
+}
+
+async function fetchUserTripsFromApi() {
+  return apiGet('/user-trips');
+}
+
+async function fetchPanicAlertsFromApi(params = {}) {
+  const queryParams = {
+    limit: params.limit || 10
+  };
+  const response = await apiGet(`/panic-alerts${buildQueryString(queryParams)}`);
+  return normalizeApiListResponse(response);
+}
+
+async function fetchUserProfileFromApi() {
+  return apiGet('/profile');
+}
+
+async function fetchTripChat(tripId) {
+  return apiGet(`/chats/${tripId}/messages`);
+}
+
+async function postTripChatMessage(tripId, payload) {
+  return apiPost(`/chats/${tripId}/messages`, payload);
 }
 
 function initializeNavigation() {
@@ -596,6 +1114,7 @@ function initializeNavigation() {
     overlay.addEventListener('click', function(e) {
       e.preventDefault();
       console.log('Overlay clicked');
+      closePanicHistoryDrawer();
       closeMenu();
     });
   }
@@ -678,6 +1197,55 @@ function initializeNavigation() {
   console.log('Navigation initialized');
 }
 
+function initializeStatusControls() {
+  const retryBtn = document.getElementById('retrySyncBtn');
+  if (retryBtn) {
+    retryBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      retryBackendSync();
+    });
+  }
+
+  const refreshAlertsBtn = document.getElementById('refreshPanicAlertsBtn');
+  if (refreshAlertsBtn) {
+    refreshAlertsBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      refreshPanicAlerts();
+    });
+  }
+
+  const openHistoryBtn = document.getElementById('openPanicHistoryBtn');
+  if (openHistoryBtn) {
+    openHistoryBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      openPanicHistoryDrawer();
+    });
+  }
+
+  const closeHistoryBtn = document.getElementById('closePanicHistoryBtn');
+  if (closeHistoryBtn) {
+    closeHistoryBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      closePanicHistoryDrawer();
+    });
+  }
+
+  const closeFeedbackBtn = document.getElementById('closeFeedbackModalBtn');
+  if (closeFeedbackBtn) {
+    closeFeedbackBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      closeTripFeedbackModal();
+    });
+  }
+
+  const feedbackRatingInput = document.getElementById('feedbackRating');
+  if (feedbackRatingInput) {
+    feedbackRatingInput.addEventListener('input', updateFeedbackRatingLabel);
+  }
+
+  updateSyncIndicator('syncing');
+}
+
 function openMenu() {
   const sideNav = document.getElementById('sideNav');
   const overlay = document.getElementById('overlay');
@@ -685,6 +1253,7 @@ function openMenu() {
   if (sideNav && overlay) {
     sideNav.classList.add('open');
     overlay.classList.add('active');
+    overlay.classList.remove('for-drawer');
     document.body.style.overflow = 'hidden';
     console.log('Menu opened');
   }
@@ -696,14 +1265,53 @@ function closeMenu() {
   
   if (sideNav && overlay) {
     sideNav.classList.remove('open');
-    overlay.classList.remove('active');
-    document.body.style.overflow = '';
+    if (!panicHistoryOpen) {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+    } else {
+      overlay.classList.add('for-drawer');
+    }
     console.log('Menu closed');
+  }
+}
+
+function openPanicHistoryDrawer() {
+  const drawer = document.getElementById('panicHistoryDrawer');
+  const overlay = document.getElementById('overlay');
+  if (!drawer) return;
+  drawer.classList.remove('hidden');
+  panicHistoryOpen = true;
+  if (overlay) {
+    overlay.classList.add('active', 'for-drawer');
+  }
+  document.body.style.overflow = 'hidden';
+  renderPanicHistory();
+}
+
+function closePanicHistoryDrawer() {
+  const drawer = document.getElementById('panicHistoryDrawer');
+  const overlay = document.getElementById('overlay');
+  const sideNav = document.getElementById('sideNav');
+  if (drawer) {
+    drawer.classList.add('hidden');
+  }
+  panicHistoryOpen = false;
+  if (overlay) {
+    overlay.classList.remove('for-drawer');
+    if (!sideNav || !sideNav.classList.contains('open')) {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+    } else {
+      document.body.style.overflow = 'hidden';
+    }
+  } else {
+    document.body.style.overflow = '';
   }
 }
 
 function showSection(sectionId) {
   console.log('Showing section:', sectionId);
+  const previousSection = currentSection;
   
   // Hide all sections
   const sections = document.querySelectorAll('.section');
@@ -717,6 +1325,12 @@ function showSection(sectionId) {
     targetSection.classList.add('active');
     currentSection = sectionId;
     console.log('Section activated:', sectionId);
+    if (previousSection === 'chat' && sectionId !== 'chat') {
+      stopChatPolling();
+    }
+    if (sectionId === 'chat' && currentChatTrip) {
+      startChatPolling(currentChatTrip);
+    }
   } else {
     console.error('Section not found:', sectionId);
   }
@@ -862,6 +1476,7 @@ function activatePanicMode() {
   activeModal.classList.add('hidden');
   countdownModal.classList.remove('hidden');
   panicAlertActive = false;
+  warmupPanicLocation();
   startPanicCountdown();
   showNotification('El botón de pánico se activará en 5 segundos.', 'warning');
 }
@@ -881,6 +1496,7 @@ function startPanicCountdown() {
   countdownModal.classList.remove('hidden');
   document.getElementById('panicActiveModal')?.classList.add('hidden');
   updateCountdownDisplay();
+  playPanicAudioCue();
 
   panicTimerId = setInterval(() => {
     panicSecondsRemaining -= 1;
@@ -893,7 +1509,7 @@ function startPanicCountdown() {
   }, 1000);
 }
 
-function triggerPanicAlert() {
+async function triggerPanicAlert() {
   if (panicAlertActive) return;
 
   panicAlertActive = true;
@@ -907,7 +1523,14 @@ function triggerPanicAlert() {
     updatePanicContacts();
   }
   updateCountdownDisplay();
-  showNotification('Botón de pánico activado. Alertas enviadas.', 'error');
+  playPanicAudioCue();
+  try {
+    await dispatchPanicAlert();
+    showNotification('Bot?n de p?nico activado. Alertas enviadas.', 'error');
+  } catch (error) {
+    console.error('No se pudo despachar la alerta de p?nico:', error);
+    showNotification('No pudimos notificar a la red. Mantente alerta.', 'warning');
+  }
 }
 
 function updateCountdownDisplay() {
@@ -922,14 +1545,7 @@ function updatePanicContacts() {
   const contactsEl = document.getElementById('panicContactsList');
   if (!contactsEl) return;
 
-  if (!Array.isArray(appData.emergencyContacts) || !appData.emergencyContacts.length) {
-    contactsEl.textContent = 'tus contactos configurados';
-    return;
-  }
-
-  contactsEl.textContent = appData.emergencyContacts
-    .map(contact => `${contact.name} (${contact.phone})`)
-    .join(', ');
+  contactsEl.textContent = buildPanicRecipientsMessage({ detailed: true });
 }
 
 function cancelPanicAlert() {
@@ -967,6 +1583,218 @@ function resetPanicState() {
   updateCountdownDisplay();
 }
 
+function playPanicAudioCue() {
+  if (!userPreferences.panic?.sound) return;
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return;
+
+  try {
+    panicAudioContext = panicAudioContext || new AudioCtx();
+    const ctx = panicAudioContext;
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+    const oscillator = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    oscillator.type = 'triangle';
+    oscillator.frequency.value = 880;
+    oscillator.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    const now = ctx.currentTime;
+    gainNode.gain.setValueAtTime(0.0001, now);
+    gainNode.gain.exponentialRampToValueAtTime(0.3, now + 0.05);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
+    oscillator.start(now);
+    oscillator.stop(now + 0.45);
+  } catch (error) {
+    console.warn('No se pudo reproducir la alerta sonora:', error);
+  }
+}
+
+
+async function warmupPanicLocation() {
+  if (!navigator.geolocation) {
+    panicLocationCache = null;
+    return null;
+  }
+
+  const shouldRequest = !panicLocationRequestedAt || (Date.now() - panicLocationRequestedAt > 60 * 1000);
+  if (!shouldRequest && panicLocationCache) {
+    return panicLocationCache;
+  }
+
+  panicLocationRequestedAt = Date.now();
+  return new Promise(resolve => {
+    navigator.geolocation.getCurrentPosition(
+      position => {
+        panicLocationCache = {
+          lat: Number(position.coords.latitude),
+          lng: Number(position.coords.longitude),
+          accuracy: Number(position.coords.accuracy || 0)
+        };
+        resolve(panicLocationCache);
+      },
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+    );
+  });
+}
+
+async function dispatchPanicAlert(additional = {}) {
+  const recipients = getEnabledPanicRecipients({ fallback: true });
+  if (!recipients.length) {
+    showNotification('Configura al menos un destinatario del botón de pánico en Configuración.', 'warning');
+    return null;
+  }
+
+  const payload = {
+    triggeredBy: (appData.users?.[0]?.name) || 'Usuario Conecta',
+    triggeredAt: new Date().toISOString(),
+    countdown: PANIC_COUNTDOWN_SECONDS,
+    recipients,
+    config: userPreferences.panic || {},
+    location: panicLocationCache,
+    status: 'active',
+    notes: additional.notes || ''
+  };
+
+  let storedAlert = { ...payload, id: Date.now().toString() };
+
+  if (backendAvailable) {
+    try {
+      const response = await apiPost('/panic-alerts', payload);
+      storedAlert = response?.data || response || storedAlert;
+      panicAlertsMeta = {
+        total: response?.meta?.total ?? panicAlertsMeta.total,
+        generatedAt: response?.meta?.generatedAt || new Date().toISOString()
+      };
+    } catch (error) {
+      setBackendAvailability(false, {
+        helper: 'No se pudo contactar al backend de alertas.'
+      });
+      console.error('Error enviando alerta de pánico:', error);
+      showNotification('No pudimos notificar al backend, guardaremos la alerta localmente.', 'warning');
+    }
+  }
+
+  appData.panicAlerts = [storedAlert, ...(appData.panicAlerts || [])];
+  panicAlertsMeta.total = appData.panicAlerts.length;
+  panicAlertsMeta.generatedAt = new Date().toISOString();
+  renderPanicAlertCard();
+  renderPanicHistory();
+  return storedAlert;
+}
+
+function setPanicAlertsLoading(isLoading) {
+  panicAlertsLoading = isLoading;
+  const refreshBtn = document.getElementById('refreshPanicAlertsBtn');
+  if (refreshBtn) {
+    refreshBtn.disabled = isLoading;
+    refreshBtn.classList.toggle('is-loading', isLoading);
+  }
+}
+
+async function refreshPanicAlerts() {
+  if (panicAlertsLoading) return;
+  if (!backendAvailable) {
+    showNotification('Sin conexión con el servidor, no es posible sincronizar las alertas.', 'warning');
+    return;
+  }
+
+  setPanicAlertsLoading(true);
+  try {
+    const response = await fetchPanicAlertsFromApi({ limit: 10 });
+    const alerts = extractArrayResponse(response);
+    if (alerts.length) {
+      appData.panicAlerts = alerts;
+      panicAlertsMeta = {
+        total: response.meta?.total ?? alerts.length,
+        generatedAt: response.meta?.generatedAt || new Date().toISOString()
+      };
+      renderPanicAlertCard();
+      renderPanicHistory();
+    }
+    showNotification('Alertas sincronizadas correctamente.', 'success');
+  } catch (error) {
+    console.error('No se pudieron actualizar las alertas de pánico:', error);
+    showNotification('No pudimos sincronizar las alertas.', 'error');
+  } finally {
+    setPanicAlertsLoading(false);
+  }
+}
+
+function renderPanicAlertCard() {
+  const statusEl = document.getElementById('panicAlertStatus');
+  const chipEl = document.getElementById('panicAlertStateChip');
+  const recipientsEl = document.getElementById('panicAlertRecipientsList');
+  const timestampEl = document.getElementById('panicAlertTimestamp');
+  const card = document.getElementById('panicAlertCard');
+  if (!card || !statusEl || !chipEl || !recipientsEl || !timestampEl) {
+    return;
+  }
+
+  const latest = (appData.panicAlerts || [])[0];
+  chipEl.classList.remove('is-online', 'is-offline');
+  const formatRecipients = (list) => {
+    if (!Array.isArray(list) || !list.length) {
+      return '<li>Selecciona destinatarios desde Configuración.</li>';
+    }
+    return list.map(recipient => `<li>${formatRecipientLabel(recipient)}</li>`).join('');
+  };
+
+  if (latest) {
+    const statusLabel = latest.status === 'resolved' ? 'Resuelta' : 'Activa';
+    chipEl.textContent = statusLabel;
+    chipEl.classList.toggle('is-online', latest.status === 'resolved');
+    chipEl.classList.toggle('is-offline', latest.status !== 'resolved');
+    statusEl.textContent = `${statusLabel} por ${latest.triggeredBy}`;
+    recipientsEl.innerHTML = formatRecipients(latest.recipients);
+    const updatedLabel = latest.triggeredAt
+      ? `Registrada ${formatRelativeTime(latest.triggeredAt)}`
+      : 'Registro sin marca de tiempo';
+    timestampEl.textContent = updatedLabel;
+  } else {
+    chipEl.textContent = 'En calma';
+    chipEl.classList.add('is-online');
+    statusEl.textContent = 'Sin alertas registradas en las últimas 24 h.';
+    const fallbackRecipients = getEnabledPanicRecipients({ fallback: false });
+    recipientsEl.innerHTML = formatRecipients(fallbackRecipients);
+    timestampEl.textContent = panicAlertsMeta.generatedAt
+      ? `Actualizado ${formatRelativeTime(panicAlertsMeta.generatedAt)}`
+      : 'Aún sin sincronizar.';
+  }
+}
+
+function renderPanicHistory() {
+  const listEl = document.getElementById('panicHistoryList');
+  if (!listEl) return;
+
+  const alerts = appData.panicAlerts || [];
+  if (!alerts.length) {
+    listEl.innerHTML = '<p class="drawer-empty">Aún no tienes alertas registradas.</p>';
+    return;
+  }
+
+  listEl.innerHTML = alerts
+    .slice(0, 20)
+    .map(alert => `
+      <div class="panic-history-item">
+        <h4>${alert.triggeredBy}</h4>
+        <div class="panic-history-meta">
+          <span>${alert.status === 'resolved' ? 'Resuelta' : 'Activa'}</span>
+          <span>${alert.triggeredAt ? formatRelativeTime(alert.triggeredAt) : 'Sin marca'}</span>
+          ${alert.location ? `<span>Lat: ${Number(alert.location.lat).toFixed(3)}, Lng: ${Number(alert.location.lng).toFixed(3)}</span>` : ''}
+        </div>
+        <p class="panic-brief__status">
+          Destinatarios: ${alert.recipients?.map(formatRecipientLabel).join(', ') || 'No especificados'}
+        </p>
+        ${alert.notes ? `<p class="panic-note">${alert.notes}</p>` : ''}
+      </div>
+    `)
+    .join('');
+}
+
+
 function markMapReady(mapElementId) {
   const mapEl = document.getElementById(mapElementId);
   if (!mapEl) return;
@@ -980,16 +1808,12 @@ function initializeDarkMode() {
   const darkModeToggle = document.getElementById('darkModeToggle');
   if (!darkModeToggle) return;
 
-  // Check for saved preference or default to light mode
-  const currentTheme = localStorage.getItem('theme') || 'light';
-  document.documentElement.setAttribute('data-color-scheme', currentTheme);
-  darkModeToggle.checked = currentTheme === 'dark';
-
+  darkModeToggle.checked = userPreferences.theme === 'dark';
   darkModeToggle.addEventListener('change', function() {
-    const theme = this.checked ? 'dark' : 'light';
-    document.documentElement.setAttribute('data-color-scheme', theme);
-    localStorage.setItem('theme', theme);
-    showNotification(`Modo ${theme === 'dark' ? 'oscuro' : 'claro'} activado`, 'info');
+    userPreferences.theme = this.checked ? 'dark' : 'light';
+    persistUserPreferences();
+    applyUserPreferences();
+    showNotification(`Modo ${userPreferences.theme === 'dark' ? 'oscuro' : 'claro'} activado`, 'info');
   });
 }
 
@@ -1035,8 +1859,176 @@ function initializeForms() {
     safetyReportForm.addEventListener('submit', handleSafetyReportSubmit);
   }
 
+  const feedbackForm = document.getElementById('tripFeedbackForm');
+  if (feedbackForm) {
+    feedbackForm.addEventListener('submit', handleTripFeedbackSubmit);
+  }
+
+  const profileForm = document.getElementById('profileForm');
+  if (profileForm) {
+    initializeProfileForm(profileForm);
+  }
+
+  initializeConfigurationPanel();
   setDefaultDates();
   initializeSwapButtons();
+  initializeRegistrationForm();
+}
+
+function initializeProfileForm(form) {
+  form.addEventListener('submit', handleProfileFormSubmit);
+  form.addEventListener('input', function() {
+    setProfileFormStatus('Tienes cambios sin guardar.', 'pending');
+  });
+
+  const avatarInput = document.getElementById('profileAvatarInput');
+  const changeAvatarBtn = document.getElementById('changeAvatarBtn');
+  if (changeAvatarBtn && avatarInput) {
+    changeAvatarBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      avatarInput.click();
+    });
+    avatarInput.addEventListener('change', function() {
+      const file = this.files && this.files[0];
+      handleAvatarSelection(file);
+      this.value = '';
+    });
+  }
+}
+
+function initializeConfigurationPanel() {
+  const languageToggle = document.getElementById('languageToggle');
+  if (languageToggle) {
+    languageToggle.checked = userPreferences.language === 'en';
+    languageToggle.addEventListener('change', function() {
+      userPreferences.language = this.checked ? 'en' : 'es';
+      persistUserPreferences();
+      applyUserPreferences();
+      showNotification(`Interfaz en ${this.checked ? 'inglés' : 'español'}.`, 'info');
+    });
+  }
+
+  const panicSoundToggle = document.getElementById('panicSoundToggle');
+  if (panicSoundToggle) {
+    panicSoundToggle.checked = Boolean(userPreferences.panic?.sound);
+    panicSoundToggle.addEventListener('change', function() {
+      userPreferences.panic.sound = this.checked;
+      persistUserPreferences();
+      applyUserPreferences();
+      showNotification(`Sonido de alerta ${this.checked ? 'activado' : 'desactivado'}.`, 'info');
+    });
+  }
+
+  setupPanicRecipientToggle('panicCarabinerosToggle', 'carabineros');
+  setupPanicRecipientToggle('panicMunicipalToggle', 'guardiaMunicipal');
+  setupPanicRecipientToggle('panicCivilToggle', 'guardiaCivil');
+  setupPanicRecipientToggle('panicContactsToggle', 'contacts');
+  setupPanicRecipientToggle('panicCommunityToggle', 'community');
+
+  const editProfileBtn = document.getElementById('editEmergencyProfileBtn');
+  if (editProfileBtn) {
+    editProfileBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      navigateToSection('perfil');
+      document.getElementById('perfil')?.scrollIntoView({ behavior: 'smooth' });
+    });
+  }
+
+  renderSettingsPanel();
+}
+
+function setupPanicRecipientToggle(elementId, key) {
+  const toggle = document.getElementById(elementId);
+  if (!toggle) return;
+  if (!userPreferences.panic) {
+    userPreferences.panic = { sound: true, recipients: {} };
+  }
+  if (!userPreferences.panic.recipients) {
+    userPreferences.panic.recipients = {};
+  }
+  toggle.checked = Boolean(userPreferences.panic.recipients[key]);
+  toggle.addEventListener('change', function() {
+    userPreferences.panic.recipients[key] = this.checked;
+    persistUserPreferences();
+    applyUserPreferences();
+    showNotification(`Enviar a ${this.nextElementSibling ? this.nextElementSibling.textContent : key}: ${this.checked ? 'sí' : 'no'}.`, 'info');
+  });
+}
+
+function renderSettingsPanel() {
+  const languageStatusEl = document.getElementById('languageStatus');
+  if (languageStatusEl) {
+    const langLabel = userPreferences.language === 'en' ? 'inglés' : 'español';
+    languageStatusEl.textContent = `Mostrando contenido en ${langLabel}.`;
+  }
+
+  const panicSummaryEl = document.getElementById('panicRecipientsSummary');
+  if (panicSummaryEl) {
+    panicSummaryEl.textContent = buildPanicRecipientsMessage({ detailed: false });
+  }
+
+  const panicContactInfoEl = document.getElementById('panicContactInfo');
+  if (panicContactInfoEl) {
+    const phone = appData.users?.[0]?.phone;
+    panicContactInfoEl.textContent = phone
+      ? `Alertaremos usando ${phone} como respaldo.`
+      : 'Aún no registras un teléfono. Actualízalo desde tu perfil.';
+  }
+}
+
+function buildPanicRecipientsMessage(options = {}) {
+  const { detailed = false } = options;
+  const config = userPreferences.panic?.recipients || {};
+  const segments = [];
+
+  if (config.carabineros) segments.push('Carabineros');
+  if (config.guardiaMunicipal) segments.push('Guardia municipal');
+  if (config.guardiaCivil) segments.push('Guardia civil');
+  if (config.contacts) {
+    if (detailed && Array.isArray(appData.emergencyContacts) && appData.emergencyContacts.length) {
+      const contactNames = appData.emergencyContacts
+        .map(contact => contact.phone ? `${contact.name} (${contact.phone})` : contact.name)
+        .join(', ');
+      segments.push(`Contactos: ${contactNames}`);
+    } else if (Array.isArray(appData.emergencyContacts) && appData.emergencyContacts.length) {
+      segments.push(`Contactos (${appData.emergencyContacts.length})`);
+    } else {
+      segments.push('Tus contactos de emergencia');
+    }
+  }
+  if (config.community) segments.push('Usuarios de Conecta');
+
+  if (!segments.length) {
+    return 'Selecciona al menos un destinatario en Configuración.';
+  }
+
+  if (detailed) {
+    return segments.join(', ');
+  }
+  return `Alertas dirigidas a: ${segments.join(', ')}`;
+}
+
+function getEnabledPanicRecipients(options = {}) {
+  const { fallback = true } = options;
+  const config = userPreferences.panic?.recipients || {};
+  const enabled = Object.entries(config)
+    .filter(([, value]) => Boolean(value))
+    .map(([key]) => key);
+  if (!enabled.length && fallback) {
+    return ['community'];
+  }
+  return enabled;
+}
+
+function formatRecipientLabel(key) {
+  const labels = {
+    carabineros: 'Carabineros',
+    guardiaMunicipal: 'Guardia municipal',
+    guardiaCivil: 'Guardia civil',
+    contacts: 'Contactos de emergencia',
+    community: 'Usuarios Conecta'
+  };
+  return labels[key] || key;
 }
 
 function setDefaultDates(scope) {
@@ -1289,6 +2281,7 @@ function addTripToUserTrips(trip, tripType, options = {}) {
     vehicle_type: trip.vehicle_type || trip.vehicleType || null,
     participantsTemplate: trip.participantsTemplate || trip.participants_template || null
   };
+  entry.chatThreadId = trip.chatThreadId || trip.referenceId || trip.id;
 
   if (isHost) {
     const profileUser = appData.users?.[0];
@@ -1312,6 +2305,67 @@ function addTripToUserTrips(trip, tripType, options = {}) {
   }
 
   return entry;
+}
+
+function enhanceUserTripEntry(entry = {}) {
+  const normalized = { ...entry };
+  normalized.chatThreadId = normalized.chatThreadId || normalized.referenceId || normalized.tripId || normalized.id;
+  if (!Array.isArray(normalized.participants) || !normalized.participants.length) {
+    normalized.participants = generateParticipantsForTrip(normalized);
+  }
+  return normalized;
+}
+
+function hydrateUserTrips(remote = {}) {
+  if (Array.isArray(remote.active)) {
+    userTrips.active = remote.active.map(enhanceUserTripEntry);
+  }
+  if (Array.isArray(remote.completed)) {
+    userTrips.completed = remote.completed.map(enhanceUserTripEntry);
+  }
+  userTripsLoaded = true;
+  renderActiveTrips();
+  renderCompletedTrips();
+}
+
+async function persistUserTripEntry(entry) {
+  if (!entry || !backendAvailable) return entry;
+  try {
+    const response = await apiPost('/user-trips', entry);
+    if (response?.data) {
+      upsertUserTripEntry(response.data);
+      return response.data;
+    }
+  } catch (error) {
+    console.warn('No se pudo sincronizar el viaje del usuario:', error);
+  }
+  return entry;
+}
+
+async function updateUserTripRemote(id, updates = {}) {
+  if (!backendAvailable || !id) return null;
+  try {
+    const response = await apiPatch(`/user-trips/${id}`, updates);
+    if (response?.data) {
+      upsertUserTripEntry(response.data);
+      return response.data;
+    }
+  } catch (error) {
+    console.warn('No se pudo actualizar el viaje del usuario:', error);
+  }
+  return null;
+}
+
+function upsertUserTripEntry(entry) {
+  if (!entry) return;
+  userTrips.active = userTrips.active.filter(item => item.id !== entry.id);
+  userTrips.completed = userTrips.completed.filter(item => item.id !== entry.id);
+  const targetList = (entry.status || '').toLowerCase().includes('complet')
+    ? userTrips.completed
+    : userTrips.active;
+  targetList.unshift(entry);
+  renderActiveTrips();
+  renderCompletedTrips();
 }
 
 function startTripLifecycleWatcher() {
@@ -1456,23 +2510,37 @@ async function handlePublicTripSubmit(e) {
   };
 
   let storedTrip = { ...tripPayload, id: Date.now() };
+  let syncedWithBackend = false;
 
   if (backendAvailable) {
     try {
-      storedTrip = await apiPost('/public-trips', tripPayload);
+      const response = await apiPost('/public-trips', tripPayload);
+      storedTrip = response?.data || response;
       if (!storedTrip.date) {
         storedTrip.date = tripPayload.date;
       }
+      syncedWithBackend = true;
     } catch (error) {
-      backendAvailable = false;
+      setBackendAvailability(false);
       console.error('Error guardando viaje público:', error);
       showNotification('Servidor no disponible, guardando viaje sólo localmente.', 'warning');
     }
   }
 
-  appData.publicTransportTrips.unshift(storedTrip);
-  refreshPublicTrips();
-  addTripToUserTrips(storedTrip, 'public', { isHost: true });
+  if (syncedWithBackend) {
+    await filterPublicTrips(publicTripsFilters.mode);
+  } else {
+    appData.publicTransportTrips.unshift(storedTrip);
+    renderPublicTrips(appData.publicTransportTrips, {
+      total: appData.publicTransportTrips.length,
+      filters: { mode: publicTripsFilters.mode || null },
+      generatedAt: new Date().toISOString()
+    });
+  }
+  const userTripEntry = addTripToUserTrips(storedTrip, 'public', { isHost: true });
+  if (userTripEntry) {
+    persistUserTripEntry(userTripEntry);
+  }
   
   e.target.reset();
   setDefaultDates(e.target);
@@ -1533,24 +2601,38 @@ async function handleVehicleTripSubmit(e) {
   };
 
   let storedTrip = { ...tripPayload, id: Date.now() };
+  let syncedWithBackend = false;
 
   if (backendAvailable) {
     try {
-      storedTrip = await apiPost('/vehicle-trips', tripPayload);
+      const response = await apiPost('/vehicle-trips', tripPayload);
+      storedTrip = response?.data || response;
       storedTrip.date = storedTrip.date || storedTrip.day || dateValue;
       if (typeof storedTrip.driver_rating === 'undefined') {
         storedTrip.driver_rating = 4.5;
       }
+      syncedWithBackend = true;
     } catch (error) {
-      backendAvailable = false;
+      setBackendAvailability(false);
       console.error('Error guardando viaje de vehículo:', error);
       showNotification('Servidor no disponible, guardando viaje sólo localmente.', 'warning');
     }
   }
 
-  appData.vehicleTrips.unshift(storedTrip);
-  refreshVehicleTrips();
-  addTripToUserTrips(storedTrip, 'vehicle', { isHost: true });
+  if (syncedWithBackend) {
+    await filterVehicleTrips(vehicleTripsFilters.type);
+  } else {
+    appData.vehicleTrips.unshift(storedTrip);
+    renderVehicleTrips(appData.vehicleTrips, {
+      total: appData.vehicleTrips.length,
+      filters: { type: vehicleTripsFilters.type || 'todos' },
+      generatedAt: new Date().toISOString()
+    });
+  }
+  const vehicleUserTrip = addTripToUserTrips(storedTrip, 'vehicle', { isHost: true });
+  if (vehicleUserTrip) {
+    persistUserTripEntry(vehicleUserTrip);
+  }
   
   e.target.reset();
   setDefaultDates(e.target);
@@ -1597,16 +2679,25 @@ async function handleSafetyReportSubmit(e) {
 
   if (backendAvailable) {
     try {
-      storedReport = await apiPost('/safety-reports', reportPayload);
+      const response = await apiPost('/safety-reports', reportPayload);
+      storedReport = response?.data || response;
+      await filterSafetyReports();
     } catch (error) {
-      backendAvailable = false;
+      setBackendAvailability(false);
       console.error('Error guardando reporte de seguridad:', error);
       showNotification('Servidor no disponible, guardando reporte sólo localmente.', 'warning');
     }
   }
 
-  appData.safetyReports.unshift(storedReport);
-  renderSafetyReports();
+  if (!backendAvailable) {
+    appData.safetyReports.unshift(storedReport);
+    safetyReportsMeta = {
+      total: appData.safetyReports.length,
+      filters: safetyReportsFilters,
+      generatedAt: new Date().toISOString()
+    };
+    renderSafetyReports(safetyReportsMeta);
+  }
   
   e.target.reset();
   
@@ -1628,7 +2719,124 @@ async function handleSafetyReportSubmit(e) {
   });
 }
 
-function renderPublicTrips(trips = appData.publicTransportTrips) {
+
+function openTripFeedbackModal(userTripId) {
+  const modal = document.getElementById('tripFeedbackModal');
+  if (!modal) return;
+  const trip = findUserTripById(userTripId);
+  if (!trip) {
+    showNotification('No encontramos la información de este viaje.', 'error');
+    return;
+  }
+
+  currentFeedbackTripId = userTripId;
+  document.getElementById('feedbackTripId').value = userTripId;
+  const ratingInput = document.getElementById('feedbackRating');
+  if (ratingInput) {
+    ratingInput.value = Math.round(trip.hostRating || 5);
+    updateFeedbackRatingLabel();
+  }
+  const donationInput = document.getElementById('feedbackDonation');
+  if (donationInput) {
+    donationInput.value = typeof trip.donationAmount === 'number' && trip.donationAmount > 0
+      ? Number(trip.donationAmount)
+      : '';
+  }
+  const notesInput = document.getElementById('feedbackNotes');
+  if (notesInput) {
+    notesInput.value = trip.feedbackNotes || '';
+  }
+  const subtitle = document.getElementById('feedbackModalSubtitle');
+  if (subtitle) {
+    subtitle.textContent = `${trip.title || 'Tu viaje'} · ${formatTripDateTime(trip.date, trip.time)}`;
+  }
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeTripFeedbackModal() {
+  const modal = document.getElementById('tripFeedbackModal');
+  if (modal) {
+    modal.classList.add('hidden');
+  }
+  currentFeedbackTripId = null;
+  const sideNav = document.getElementById('sideNav');
+  if (!panicHistoryOpen && !(sideNav && sideNav.classList.contains('open'))) {
+    document.body.style.overflow = '';
+  }
+}
+
+function updateFeedbackRatingLabel() {
+  const ratingInput = document.getElementById('feedbackRating');
+  const ratingValueEl = document.getElementById('feedbackRatingValue');
+  if (ratingInput && ratingValueEl) {
+    ratingValueEl.textContent = ratingInput.value;
+  }
+}
+
+async function handleTripFeedbackSubmit(e) {
+  e.preventDefault();
+  const form = e.target;
+  const tripId = form.userTripId.value || currentFeedbackTripId;
+  if (!tripId) {
+    showNotification('No encontramos el viaje a evaluar.', 'error');
+    return;
+  }
+  const rating = Number(form.rating.value || 5);
+  const donation = Number(form.donation.value || 0);
+  const notes = form.notes.value?.trim() || '';
+
+  const updates = {
+    hostRating: rating,
+    donationAmount: donation,
+    donationConfirmed: donation > 0,
+    feedbackNotes: notes,
+    feedbackSubmittedAt: new Date().toISOString()
+  };
+
+  let synced = false;
+  if (backendAvailable) {
+    const updated = await updateUserTripRemote(tripId, updates);
+    if (updated) {
+      upsertUserTripEntry(updated);
+      synced = true;
+    }
+  }
+
+  if (!synced) {
+    applyUserTripFeedbackLocal(tripId, updates);
+  }
+
+  form.reset();
+  updateFeedbackRatingLabel();
+  closeTripFeedbackModal();
+  renderCompletedTrips();
+  renderCommunityPulse();
+  showNotification('Gracias por compartir tu experiencia.', 'success');
+}
+
+function applyUserTripFeedbackLocal(tripId, updates = {}) {
+  if (!tripId) return null;
+  const buckets = [userTrips.active, userTrips.completed];
+  for (const list of buckets) {
+    const entry = list.find(item => item.id === tripId);
+    if (entry) {
+      Object.assign(entry, updates);
+      return entry;
+    }
+  }
+  return null;
+}
+
+function findUserTripById(tripId) {
+  if (!tripId) return null;
+  return userTrips.active.find(item => item.id === tripId)
+    || userTrips.completed.find(item => item.id === tripId)
+    || null;
+}
+
+function renderPublicTrips(trips = appData.publicTransportTrips, metaOverride = null) {
+  updatePublicTripsSummary(metaOverride || publicTripsMeta);
   const container = document.getElementById('publicTrips');
   if (!container) return;
 
@@ -1742,6 +2950,12 @@ function renderActiveTrips() {
     const organizerStats = (trip.isHost && trip.organizerRating)
       ? `<p class="organizer-rating">${Number(trip.organizerRating).toFixed(1)} ★ · ${trip.organizerTrips || 0} viajes</p>`
       : '';
+    const feedbackCta = trip.hostRating
+      ? `<span class="trip-note">Calificado ${Number(trip.hostRating).toFixed(1)} ★</span>`
+      : `<button class="btn btn--primary btn--sm" onclick="openTripFeedbackModal('${trip.id}')">Calificar viaje</button>`;
+    const donationChip = typeof trip.donationAmount === 'number' && trip.donationAmount > 0
+      ? `<span class="donation-chip">$${Number(trip.donationAmount).toLocaleString('es-CL')} entregados</span>`
+      : '';
 
     return `
       <div class="my-trip-card card">
@@ -1780,6 +2994,13 @@ function renderCompletedTrips() {
     const organizerStats = trip.organizerRating
       ? `<p class="organizer-rating">${Number(trip.organizerRating).toFixed(1)} ★ · ${trip.organizerTrips || 0} viajes</p>`
       : '';
+    const feedbackCta = trip.hostRating
+      ? `<span class="trip-note">Calificado ${Number(trip.hostRating).toFixed(1)} ★</span>`
+      : `<button class="btn btn--primary btn--sm" onclick="openTripFeedbackModal('${trip.id}')">Calificar viaje</button>`;
+    const donationChip = typeof trip.donationAmount === 'number' && trip.donationAmount > 0
+      ? `<span class="donation-chip">$${Number(trip.donationAmount).toLocaleString('es-CL')} entregados</span>`
+      : '';
+
     return `
       <div class="completed-trip-card card">
         <div class="card__body">
@@ -1792,7 +3013,9 @@ function renderCompletedTrips() {
           </div>
           <div class="trip-actions">
             <button class="btn btn--outline btn--sm" onclick="viewUserTripDetail('${trip.id}', 'completed')">Detalles</button>
+            ${feedbackCta}
           </div>
+          ${donationChip}
           <small class="trip-note">${trip.completionReason || 'Viaje finalizado'}</small>
         </div>
       </div>
@@ -1800,41 +3023,138 @@ function renderCompletedTrips() {
   }).join('');
 }
 
-function renderSafetyReports() {
+
+function renderSafetyReports(metaOverride = null) {
+  updateSafetyReportsSummary(metaOverride || safetyReportsMeta);
   const container = document.querySelector('.safety-reports');
   if (!container) return;
 
-  container.innerHTML = appData.safetyReports.map(report => {
-    const voteValue = userReportVotes[String(report.id)] || 0;
-    const upActive = voteValue === 1 ? 'active' : '';
-    const downActive = voteValue === -1 ? 'active' : '';
+  const reports = (appData.safetyReports || []).slice().sort((a, b) => {
+    const weightDiff = getSeverityWeight(b.severity) - getSeverityWeight(a.severity);
+    if (weightDiff !== 0) return weightDiff;
+    const dateA = `${a.date || ''}T${a.time || '00:00'}`;
+    const dateB = `${b.date || ''}T${b.time || '00:00'}`;
+    return dateB.localeCompare(dateA);
+  });
+
+  if (!reports.length) {
+    container.innerHTML = '<p class="trip-empty">Aún no hay reportes registrados.</p>';
+    renderSafetyReportsInsights([]);
+    return;
+  }
+
+  renderSafetyReportsInsights(reports);
+
+  container.innerHTML = reports.map(report => {
+    const key = String(report.id);
+    const voteValue = userReportVotes[key] || 0;
+    const votePending = Boolean(reportVoteInFlight[key]);
+    const typeInfo = getReportTypeInfo(report.type);
+    const severityInfo = getSeverityInfo(report.severity);
+    const voteCount = typeof report.votes === 'number' ? report.votes : 0;
+    const reportDateLabel = report.date ? formatDate(report.date) : 'Fecha no disponible';
+    const relativeSource = report.date ? `${report.date}T${report.time || '00:00'}` : null;
+    const relativeLabel = relativeSource ? formatRelativeTime(relativeSource) : '';
+    const timeBadge = report.time ? `<span><i class="fas fa-clock"></i>${report.time}</span>` : '';
     return `
-    <div class="safety-report-card card">
+    <article class="safety-report-card card" data-report-id="${report.id}">
       <div class="card__body">
         <div class="report-header">
-          <span class="severity-badge ${report.severity}">
-            ${report.severity === 'low' ? 'Riesgo Bajo' : 
-              report.severity === 'medium' ? 'Riesgo Medio' : 'Riesgo Alto'}
-          </span>
-          <span class="report-time">${report.time}</span>
+          <div class="report-type">
+            <i class="${typeInfo.icon}"></i>
+            <span>${typeInfo.label}</span>
+          </div>
+          <span class="severity-badge ${severityInfo.className}">${severityInfo.label}</span>
         </div>
-        <h4>${report.location}</h4>
-        <p>${report.description}</p>
-        <small>Reportado el ${formatDate(report.date)}</small>
+        <div class="report-meta">
+          <span><i class="fas fa-map-marker-alt"></i>${report.location || 'Ubicación no especificada'}</span>
+          ${timeBadge}
+          <span><i class="fas fa-calendar-day"></i>${reportDateLabel}</span>
+          ${relativeLabel ? `<span><i class="fas fa-clock-rotate-left"></i>${relativeLabel}</span>` : ''}
+        </div>
+        <p class="report-description">${report.description || 'Sin descripción disponible'}</p>
+        <div class="report-tags">
+          <span class="report-chip">${voteCount} votos</span>
+          ${report.anonymous ? '<span class="report-chip ghost">Anónimo</span>' : ''}
+          ${normalizeText(report.type) === 'safe_route' ? '<span class="report-chip success">Ruta segura</span>' : ''}
+        </div>
         <div class="vote-controls">
-          <button type="button" class="btn btn--outline btn--sm ${upActive}" onclick="voteReport(${report.id}, 1)">
+          <button type="button" class="btn btn--outline btn--sm ${voteValue === 1 ? 'active' : ''}" onclick="voteReport('${report.id}', 1)" ${votePending ? 'disabled' : ''} aria-pressed="${voteValue === 1}">
             <i class="fas fa-thumbs-up"></i>
           </button>
-          <span class="vote-count" id="reportVotes-${report.id}">${report.votes ?? 0}</span>
-          <button type="button" class="btn btn--outline btn--sm ${downActive}" onclick="voteReport(${report.id}, -1)">
+          <span class="vote-count" id="reportVotes-${report.id}">${voteCount}</span>
+          <button type="button" class="btn btn--outline btn--sm ${voteValue === -1 ? 'active' : ''}" onclick="voteReport('${report.id}', -1)" ${votePending ? 'disabled' : ''} aria-pressed="${voteValue === -1}">
             <i class="fas fa-thumbs-down"></i>
           </button>
         </div>
       </div>
-    </div>
+    </article>
   `;
   }).join('');
 }
+
+function renderSafetyReportsInsights(reports = []) {
+  const insightsEl = document.getElementById('safetyReportsInsights');
+  if (!insightsEl) return;
+  if (!reports.length) {
+    insightsEl.innerHTML = '<p class="insight-empty">Aún no hay datos para analizar.</p>';
+    return;
+  }
+
+  const stats = computeSafetyReportStats(reports);
+  const topTypeEntry = Object.entries(stats.type).sort((a, b) => b[1] - a[1])[0] || ['default', 0];
+  const topType = getReportTypeInfo(topTypeEntry[0]).label;
+
+  insightsEl.innerHTML = `
+    <div class="report-insight-card">
+      <span class="report-insight-value">${stats.total}</span>
+      <span class="report-insight-label">Reportes activos</span>
+    </div>
+    <div class="report-insight-card emphasis">
+      <span class="report-insight-value">${stats.severity.high}</span>
+      <span class="report-insight-label">Riesgo alto</span>
+    </div>
+    <div class="report-insight-card success">
+      <span class="report-insight-value">${topType}</span>
+      <span class="report-insight-label">Tipo más frecuente</span>
+    </div>
+  `;
+}
+
+function computeSafetyReportStats(reports = []) {
+  const stats = {
+    total: reports.length,
+    severity: { high: 0, medium: 0, low: 0 },
+    type: {}
+  };
+
+  reports.forEach(report => {
+    const severity = normalizeText(report.severity) || 'low';
+    if (typeof stats.severity[severity] === 'number') {
+      stats.severity[severity] += 1;
+    }
+    const typeKey = normalizeText(report.type) || 'default';
+    stats.type[typeKey] = (stats.type[typeKey] || 0) + 1;
+  });
+
+  return stats;
+}
+
+function getReportTypeInfo(type = '') {
+  const normalized = normalizeText(type);
+  return SAFETY_REPORT_TYPE_INFO[normalized] || SAFETY_REPORT_TYPE_INFO.default;
+}
+
+function getSeverityInfo(level = 'low') {
+  const normalized = normalizeText(level);
+  return SEVERITY_INFO[normalized] || SEVERITY_INFO.low;
+}
+
+function getSeverityWeight(level = 'low') {
+  const info = getSeverityInfo(level);
+  return info.weight || 0;
+}
+
 
 function renderRecentActivity() {
   const container = document.getElementById('recentActivityList');
@@ -1885,7 +3205,7 @@ function viewUserTripDetail(userTripId, contextOverride = null) {
   openTripDetailModal(trip, context);
 }
 
-function openTripChat(tripId) {
+async function openTripChat(tripId) {
   const trip = userTrips.active.find(item => item.id === tripId);
   if (!trip) {
     showNotification('Sólo puedes abrir el chat de viajes activos.', 'warning');
@@ -1895,14 +3215,59 @@ function openTripChat(tripId) {
   if (!trip.participants) {
     trip.participants = generateParticipantsForTrip(trip);
   }
-  if (!trip.messages) {
-    trip.messages = generateChatMessages(trip);
-  }
 
   currentChatTrip = trip;
-  renderChatView();
+  trip.chatThreadId = trip.chatThreadId || trip.referenceId || trip.id;
+  setChatSyncState({ status: backendAvailable ? 'idle' : 'offline', error: null });
+  updateChatRefreshButton();
   navigateToSection('chat');
+  await loadChatHistory(trip, { force: true });
+  renderChatView();
+  startChatPolling(trip);
 }
+
+async function loadChatHistory(trip, options = {}) {
+  if (!trip) return;
+  const remoteTripId = trip.chatThreadId || trip.referenceId || trip.id;
+  const forceRefresh = Boolean(options.force);
+
+  if (chatMessagesCache[remoteTripId] && !forceRefresh) {
+    trip.messages = chatMessagesCache[remoteTripId];
+    return;
+  }
+
+  if (!backendAvailable) {
+    if (!trip.messages) {
+      trip.messages = generateChatMessages(trip);
+    }
+    setChatSyncState({ status: 'offline' });
+    return;
+  }
+
+  try {
+    setChatLoading(true);
+    setChatSyncState({ status: 'syncing', error: null });
+    const response = await fetchTripChat(remoteTripId);
+    const messages = extractArrayResponse(response).map(message => mapChatMessageToClient(message));
+    if (messages.length) {
+      chatMessagesCache[remoteTripId] = messages;
+      trip.messages = messages;
+    } else if (!trip.messages) {
+      trip.messages = generateChatMessages(trip);
+    }
+    setChatSyncState({ status: 'updated', updatedAt: new Date().toISOString(), error: null });
+  } catch (error) {
+    console.warn('No se pudo sincronizar el chat:', error);
+    if (!trip.messages) {
+      trip.messages = generateChatMessages(trip);
+    }
+    setChatSyncState({ status: 'error', error: error.message || 'Sin conexión' });
+    showNotification('No pudimos cargar el chat, mostrando mensajes locales.', 'warning');
+  } finally {
+    setChatLoading(false);
+  }
+}
+
 
 function renderChatView() {
   const trip = currentChatTrip;
@@ -1916,20 +3281,32 @@ function renderChatView() {
   }
 
   titleEl.textContent = trip.title || 'Chat del viaje';
-  subtitleEl.textContent = `${trip.origin} → ${trip.destination}`;
+  const routeLabel = [trip.origin, trip.destination].filter(Boolean).join(' -> ');
+  subtitleEl.textContent = routeLabel || 'Conversación activa';
 
-  listEl.innerHTML = (trip.messages || []).map(message => `
-    <div class="chat-message ${message.mine ? 'mine' : ''}">
-      <div class="chat-message-header">
-        <img src="${message.avatar || createAvatarFromName(message.sender)}" alt="${message.sender}">
-        <div>
-          <h5>${message.sender}</h5>
-          <small>${formatRelativeTime(message.timestamp)}</small>
+  if (chatLoading) {
+    listEl.innerHTML = '<p class="activity-empty">Cargando mensajes...</p>';
+  } else if (!trip.messages || !trip.messages.length) {
+    listEl.innerHTML = '<p class="activity-empty">Aún no hay mensajes.</p>';
+  } else {
+    listEl.innerHTML = trip.messages.map(message => {
+      const statusText = getChatMessageStatusLabel(message.status);
+      const statusClass = message.status && message.status !== 'sent' ? ` ${message.status}` : '';
+      return `
+      <div class="chat-message ${message.mine ? 'mine' : ''}${statusClass}">
+        <div class="chat-message-header">
+          <img src="${message.avatar || createAvatarFromName(message.sender)}" alt="${message.sender}">
+          <div>
+            <h5>${message.sender}</h5>
+            <small>${formatRelativeTime(message.timestamp)}</small>
+          </div>
         </div>
+        <p class="chat-message-body">${message.text}</p>
+        ${statusText ? `<span class="chat-message-status ${message.status === 'error' ? 'error' : ''}">${statusText}</span>` : ''}
       </div>
-      <p class="chat-message-body">${message.text}</p>
-    </div>
-  `).join('');
+    `;
+    }).join('');
+  }
 
   renderChatParticipants(trip);
   scrollChatToBottom();
@@ -1947,15 +3324,106 @@ function renderChatParticipants(trip) {
   participantsEl.innerHTML = trip.participants.map(participant => `
     <div class="participant-pill">
       <img src="${participant.avatar || createAvatarFromName(participant.name)}" alt="${participant.name}">
-      <div>
+      <div class="participant-pill-content">
         <h5>${participant.name}</h5>
-        <small>${participant.role || 'Pasajero'} · ${participant.rating ? `${Number(participant.rating).toFixed(1)} ★` : '—'} · ${participant.trips || 0} viajes</small>
+        <small>${participant.role || 'Compañero'}${participant.rating ? ` · ${Number(participant.rating).toFixed(1)}★` : ''}</small>
       </div>
+      ${participant.trips ? `<span class="participant-chip">${participant.trips} viajes</span>` : ''}
     </div>
   `).join('');
 }
 
-function handleChatMessageSubmit() {
+function startChatPolling(trip = currentChatTrip) {
+  stopChatPolling();
+  if (!trip || !backendAvailable) return;
+  chatPollingIntervalId = setInterval(() => {
+    if (document.hidden || currentSection !== 'chat' || chatLoading) {
+      return;
+    }
+    refreshChatMessages({ silent: true });
+  }, CHAT_POLLING_INTERVAL_MS);
+}
+
+function stopChatPolling() {
+  if (chatPollingIntervalId) {
+    clearInterval(chatPollingIntervalId);
+    chatPollingIntervalId = null;
+  }
+}
+
+async function refreshChatMessages(options = {}) {
+  if (!currentChatTrip) return;
+  if (!backendAvailable) {
+    if (!options.silent) {
+      showNotification('Servidor no disponible, el chat está en modo offline.', 'warning');
+      setChatSyncState({ status: 'offline' });
+    }
+    return;
+  }
+  if (chatLoading) return;
+  await loadChatHistory(currentChatTrip, { force: true });
+  renderChatView();
+  if (!options.silent) {
+    showNotification('Chat actualizado', 'success');
+  }
+}
+
+function setChatSyncState(patch = {}) {
+  chatSyncState = { ...chatSyncState, ...patch };
+  renderChatStatus();
+}
+
+function renderChatStatus() {
+  const pill = document.getElementById('chatStatusPill');
+  if (!pill) return;
+  const status = chatSyncState.status || 'idle';
+  pill.className = `chat-status is-${status}`;
+  const textEl = document.getElementById('chatStatusText');
+  const timeEl = document.getElementById('chatStatusTime');
+  if (textEl) {
+    textEl.textContent = getChatStatusMessage(status, chatSyncState.error);
+  }
+  if (timeEl) {
+    const label = chatSyncState.updatedAt
+      ? `Última sincronización: ${formatRelativeTime(chatSyncState.updatedAt)}`
+      : 'Última sincronización: nunca';
+    timeEl.textContent = label;
+  }
+  updateChatRefreshButton();
+}
+
+function getChatStatusMessage(status, error) {
+  switch (status) {
+    case 'syncing':
+      return 'Sincronizando mensajes...';
+    case 'updated':
+      return 'Chat actualizado';
+    case 'error':
+      return error ? `Error: ${error}` : 'Error al sincronizar';
+    case 'offline':
+      return 'Modo sin conexión';
+    default:
+      return 'Selecciona un viaje para cargar el chat';
+  }
+}
+
+function updateChatRefreshButton() {
+  const refreshBtn = document.getElementById('chatRefreshBtn');
+  if (!refreshBtn) return;
+  const disabled = !currentChatTrip || chatLoading;
+  refreshBtn.disabled = disabled;
+  refreshBtn.classList.toggle('is-loading', chatLoading);
+}
+
+function getChatMessageStatusLabel(status) {
+  if (status === 'pending') return 'Enviando...';
+  if (status === 'error') return 'No entregado';
+  if (status === 'local') return 'Guardado localmente';
+  return '';
+}
+
+
+async function handleChatMessageSubmit() {
   if (!currentChatTrip) {
     showNotification('No hay un chat activo.', 'warning');
     return;
@@ -1964,19 +3432,66 @@ function handleChatMessageSubmit() {
   if (!input || !input.value.trim()) return;
 
   const user = appData.users?.[0];
-  const message = {
+  const form = document.getElementById('chatMessageForm');
+  const submitBtn = form?.querySelector('button[type="submit"]');
+  const remoteTripId = currentChatTrip.chatThreadId || currentChatTrip.referenceId || currentChatTrip.id;
+  const baseMessage = {
     id: `msg_${Date.now()}`,
     sender: user?.name || 'Usuario',
     avatar: user?.photo || createAvatarFromName(user?.name || 'Usuario'),
     text: input.value.trim(),
     timestamp: new Date().toISOString(),
-    mine: true
+    mine: true,
+    status: backendAvailable ? 'pending' : 'local'
   };
 
   currentChatTrip.messages = currentChatTrip.messages || [];
-  currentChatTrip.messages.push(message);
+  currentChatTrip.messages.push(baseMessage);
+  chatMessagesCache[remoteTripId] = currentChatTrip.messages.slice();
+  if (submitBtn) submitBtn.disabled = true;
+  input.disabled = true;
   input.value = '';
   renderChatView();
+
+  if (!backendAvailable) {
+    showNotification('Mensaje guardado localmente. Cuando el servidor vuelva intentaremos enviarlo.', 'warning');
+    input.disabled = false;
+    if (submitBtn) submitBtn.disabled = false;
+    return;
+  }
+
+  try {
+    const response = await postTripChatMessage(remoteTripId, {
+      senderId: user?.id || 'demo-user',
+      senderName: user?.name || 'Usuario',
+      text: baseMessage.text,
+      avatar: baseMessage.avatar
+    });
+    if (response?.data) {
+      const mapped = mapChatMessageToClient(response.data);
+      const index = currentChatTrip.messages.findIndex(msg => msg.id === baseMessage.id);
+      if (index !== -1) {
+        currentChatTrip.messages[index] = { ...mapped, mine: true, status: 'sent' };
+      }
+      chatMessagesCache[remoteTripId] = currentChatTrip.messages.slice();
+      setChatSyncState({ status: 'updated', updatedAt: new Date().toISOString(), error: null });
+      renderChatView();
+    }
+  } catch (error) {
+    setBackendAvailability(false);
+    console.warn('No se pudo enviar el mensaje al servidor:', error);
+    const index = currentChatTrip.messages.findIndex(msg => msg.id === baseMessage.id);
+    if (index !== -1) {
+      currentChatTrip.messages[index] = { ...currentChatTrip.messages[index], status: 'error' };
+    }
+    chatMessagesCache[remoteTripId] = currentChatTrip.messages.slice();
+    setChatSyncState({ status: 'error', error: error.message || 'Sin conexión' });
+    showNotification('El mensaje se guardó sólo localmente.', 'warning');
+    renderChatView();
+  } finally {
+    input.disabled = false;
+    if (submitBtn) submitBtn.disabled = false;
+  }
 }
 
 function scrollChatToBottom() {
@@ -1999,7 +3514,8 @@ function generateChatMessages(trip) {
       avatar: hostAvatar,
       text: 'Hola a todos, gracias por unirse. Nos reunimos en el punto acordado 5 minutos antes.',
       timestamp: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
-      mine: Boolean(trip.isHost)
+      mine: Boolean(trip.isHost),
+      status: 'sent'
     },
     firstPassenger ? {
       id: `msg_${trip.id}_2`,
@@ -2007,9 +3523,26 @@ function generateChatMessages(trip) {
       avatar: firstPassenger.avatar || createAvatarFromName(firstPassenger.name),
       text: '¡Perfecto! Llegaré 10 minutos antes.',
       timestamp: new Date(Date.now() - 25 * 60 * 1000).toISOString(),
-      mine: false
+      mine: false,
+      status: 'sent'
     } : null
   ].filter(Boolean);
+}
+
+function mapChatMessageToClient(message = {}) {
+  const user = appData.users?.[0];
+  const currentUserId = user?.id ? String(user.id) : '';
+  const senderId = message.senderId ? String(message.senderId) : '';
+  const senderName = message.senderName || message.sender || 'Usuario';
+  return {
+    id: message.id || `msg_${Date.now()}`,
+    sender: senderName,
+    avatar: message.avatar || createAvatarFromName(senderName),
+    text: message.text || '',
+    timestamp: message.timestamp || new Date().toISOString(),
+    mine: currentUserId ? senderId === currentUserId : senderName === user?.name,
+    status: message.status || 'sent'
+  };
 }
 
 async function openTripDetailModal(trip, context) {
@@ -2289,17 +3822,21 @@ function setParticipantRating(participantId, rating) {
   showNotification(`Calificaste a ${participant.name} con ${rating} estrella${rating > 1 ? 's' : ''}`, 'success');
 }
 
-function voteReport(reportId, delta) {
+async function voteReport(reportId, delta) {
   const report = appData.safetyReports.find(r => String(r.id) === String(reportId));
   if (!report) return;
   const key = String(report.id);
+  if (reportVoteInFlight[key]) {
+    return;
+  }
   const previousVote = userReportVotes[key] || 0;
   let nextVote = delta;
   if (previousVote === delta) {
     nextVote = 0;
   }
 
-  report.votes = (report.votes || 0) + nextVote - previousVote;
+  const deltaChange = nextVote - previousVote;
+  report.votes = (report.votes || 0) + deltaChange;
 
   if (nextVote === 0) {
     delete userReportVotes[key];
@@ -2308,7 +3845,28 @@ function voteReport(reportId, delta) {
   }
 
   persistReportVotes();
+  if (deltaChange !== 0 && backendAvailable) {
+    reportVoteInFlight[key] = true;
+  }
   renderSafetyReports();
+
+  if (!backendAvailable || deltaChange === 0) {
+    if (reportVoteInFlight[key]) {
+      delete reportVoteInFlight[key];
+    }
+    return;
+  }
+
+  try {
+    await apiPost(`/safety-reports/${report.id}/votes`, { delta: deltaChange });
+  } catch (error) {
+    setBackendAvailability(false);
+    console.warn('No se pudo registrar el voto en el servidor:', error);
+    showNotification('No pudimos sincronizar tu voto. Se mantendrá sólo en este dispositivo.', 'warning');
+  } finally {
+    delete reportVoteInFlight[key];
+    renderSafetyReports();
+  }
 }
 
 function registerActivity({ icon = 'fas fa-bell', title, description = '' }) {
@@ -2348,9 +3906,9 @@ function getModeClassName(mode = '') {
 }
 
 function renderInitialData() {
-  refreshPublicTrips();
-  refreshVehicleTrips();
-  renderSafetyReports();
+  renderPublicTrips(appData.publicTransportTrips, publicTripsMeta);
+  renderVehicleTrips(appData.vehicleTrips, vehicleTripsMeta);
+  renderSafetyReports(safetyReportsMeta);
   renderRecentActivity();
   renderActiveTrips();
   renderCompletedTrips();
@@ -2374,6 +3932,7 @@ function joinTrip(tripId, tripType, options = {}) {
     showNotification('Ya estás unido a este viaje.', 'info');
     return;
   }
+  persistUserTripEntry(entry);
 
   showNotification('Te uniste al viaje. Revisa Mis Viajes.', 'success');
   return entry;
@@ -2382,6 +3941,12 @@ function joinTrip(tripId, tripType, options = {}) {
 function renderProfile() {
   const user = appData.users?.[0];
   if (!user) return;
+
+  if (!user.profileUpdatedAt) {
+    user.profileUpdatedAt = new Date().toISOString();
+  }
+
+  syncEmergencyContactsFromUser(user);
 
   const nameEl = document.getElementById('profileName');
   const emailEl = document.getElementById('profileEmail');
@@ -2398,17 +3963,42 @@ function renderProfile() {
   if (ratingEl) ratingEl.textContent = user.rating?.toFixed(1) ?? '—';
   if (avatarImg && user.photo) avatarImg.src = user.photo;
 
-  const isVerified = Boolean(
-    user.phone &&
-    user.emergency_contacts &&
-    user.description &&
-    user.bank_details
-  );
+  const progress = calculateProfileProgress(user);
+  const verificationComplete = progress.missing.length === 0;
+
   if (verificationEl) {
-    verificationEl.classList.toggle('unverified', !isVerified);
-    verificationEl.innerHTML = isVerified
-      ? '<i class="fas fa-circle-check"></i> Perfil verificado'
-      : '<i class="fas fa-circle-exclamation"></i> Completa tu perfil para verificarte';
+    verificationEl.classList.toggle('unverified', !verificationComplete);
+    if (verificationComplete) {
+      verificationEl.innerHTML = '<i class="fas fa-circle-check"></i> Perfil verificado';
+    } else {
+      verificationEl.innerHTML = `<i class="fas fa-circle-exclamation"></i> Completa tu perfil (${progress.missing.length} pendiente${progress.missing.length === 1 ? '' : 's'})`;
+    }
+  }
+
+  const progressBar = document.getElementById('profileProgressBar');
+  if (progressBar) {
+    const width = progress.percent === 0 ? 4 : progress.percent;
+    progressBar.style.width = `${width}%`;
+  }
+  const progressValueEl = document.getElementById('profileProgressValue');
+  if (progressValueEl) {
+    progressValueEl.textContent = `${progress.percent}%`;
+  }
+  const progressLabel = document.getElementById('profileProgressLabel');
+  if (progressLabel) {
+    progressLabel.textContent = verificationComplete
+      ? '¡Tu perfil está completo y verificado!'
+      : `Completa ${progress.missing.length} campo${progress.missing.length === 1 ? '' : 's'} para desbloquear la verificación comunitaria.`;
+  }
+  const missingList = document.getElementById('profileMissingFields');
+  if (missingList) {
+    missingList.innerHTML = progress.missing.length
+      ? progress.missing.map(item => `<li>${item}</li>`).join('')
+      : '<li class="all-good">Perfil completo</li>';
+  }
+  const updatedEl = document.getElementById('profileUpdatedAt');
+  if (updatedEl) {
+    updatedEl.textContent = `Última actualización: ${formatRelativeTime(user.profileUpdatedAt)}`;
   }
 
   const phoneField = document.getElementById('profilePhone');
@@ -2420,6 +4010,265 @@ function renderProfile() {
   if (contactsField) contactsField.value = user.emergency_contacts || '';
   if (descriptionField) descriptionField.value = user.description || '';
   if (bankField) bankField.value = user.bank_details || '';
+
+  setProfileFormStatus('', '');
+  renderSettingsPanel();
+  updatePanicContacts();
+}
+
+function calculateProfileProgress(user = {}) {
+  const requiredKeys = Object.keys(PROFILE_REQUIRED_FIELDS);
+  const total = requiredKeys.length || 1;
+  let completed = 0;
+  const missing = [];
+
+  requiredKeys.forEach(key => {
+    if (user[key] && String(user[key]).trim().length) {
+      completed += 1;
+    } else {
+      missing.push(PROFILE_REQUIRED_FIELDS[key]);
+    }
+  });
+
+  const percent = Math.round((completed / total) * 100);
+  return { percent, missing };
+}
+
+function setProfileFormStatus(message = '', state = '') {
+  const statusEl = document.getElementById('profileFormStatus');
+  if (!statusEl) return;
+  statusEl.textContent = message;
+  statusEl.className = `form-status${state ? ` ${state}` : ''}`;
+}
+
+function setProfileSyncState(patch = {}) {
+  profileSyncState = { ...profileSyncState, ...patch };
+}
+
+function mergeProfileFromApi(profile = {}) {
+  if (!profile) return;
+  updateUserProfile(profile, { skipTimestamp: true });
+  setProfileSyncState({
+    status: 'online',
+    updatedAt: profile.profileUpdatedAt || new Date().toISOString(),
+    error: null
+  });
+}
+
+function initializeRegistrationForm() {
+  const form = document.getElementById('registrationForm');
+  if (!form) return;
+  form.addEventListener('submit', handleRegistrationSubmit);
+  const methodSelect = document.getElementById('registrationMethod');
+  if (methodSelect) {
+    const toggle = () => {
+      const codeGroup = document.getElementById('registrationCodeGroup');
+      if (codeGroup) {
+        codeGroup.classList.toggle('hidden', methodSelect.value !== 'codigo');
+      }
+    };
+    toggle();
+    methodSelect.addEventListener('change', toggle);
+  }
+  setRegistrationStatus('Utiliza tu correo institucional para comenzar.', 'pending');
+}
+
+async function syncProfileWithBackend(updates = {}) {
+  if (!backendAvailable) {
+    setProfileSyncState({ status: 'offline', error: 'Sin conexión con el servidor.' });
+    return false;
+  }
+  setProfileSyncState({ status: 'syncing', error: null });
+  try {
+    const response = await apiPatch('/profile', updates);
+    if (response?.data) {
+      mergeProfileFromApi(response.data);
+      return true;
+    }
+  } catch (error) {
+    setProfileSyncState({ status: 'error', error: error.message });
+    throw error;
+  }
+  return false;
+}
+
+async function handleProfileFormSubmit(e) {
+  e.preventDefault();
+  const phoneField = document.getElementById('profilePhone');
+  const contactsField = document.getElementById('profileEmergencyContacts');
+  const descriptionField = document.getElementById('profileDescription');
+  const bankField = document.getElementById('profileBankDetails');
+
+  const phoneValue = phoneField?.value.trim() || '';
+  const contactsValue = contactsField?.value.trim() || '';
+  const descriptionValue = descriptionField?.value.trim() || '';
+  const bankValue = bankField?.value.trim() || '';
+
+  if (phoneValue && phoneValue.replace(/\D/g, '').length < 8) {
+    setProfileFormStatus('Ingresa un teléfono válido.', 'error');
+    showNotification('Ingresa un teléfono válido.', 'error');
+    return;
+  }
+
+  const updates = {
+    phone: phoneValue,
+    emergency_contacts: contactsValue,
+    description: descriptionValue,
+    bank_details: bankValue,
+    profileUpdatedAt: new Date().toISOString()
+  };
+
+  updateUserProfile(updates, { skipTimestamp: true });
+  setProfileFormStatus('Guardando cambios...', 'pending');
+
+  try {
+    const synced = await syncProfileWithBackend(updates);
+    if (synced) {
+      setProfileFormStatus('Perfil sincronizado correctamente.', 'success');
+      showNotification('Perfil actualizado correctamente.', 'success');
+    } else {
+      setProfileFormStatus('Guardado local. Reintenta cuando vuelva la conexión.', 'warning');
+      showNotification('No pudimos sincronizar con el servidor. Tus cambios se guardaron localmente.', 'warning');
+    }
+  } catch (error) {
+    console.warn('No se pudo sincronizar el perfil:', error);
+    setProfileFormStatus('Guardado local. Reintenta cuando vuelva la conexión.', 'warning');
+    showNotification('No pudimos sincronizar con el servidor. Tus cambios se guardaron localmente.', 'warning');
+  }
+}
+
+function handleAvatarSelection(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    showNotification('Selecciona una imagen en formato válido.', 'warning');
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = function(event) {
+    if (!event.target?.result) return;
+    const updates = {
+      photo: event.target.result,
+      profileUpdatedAt: new Date().toISOString()
+    };
+    updateUserProfile(updates, { skipTimestamp: true });
+    setProfileFormStatus('Actualizando foto...', 'pending');
+    syncProfileWithBackend(updates)
+      .then(synced => {
+        if (synced) {
+          setProfileFormStatus('Foto de perfil actualizada.', 'success');
+          showNotification('Foto de perfil actualizada.', 'success');
+        } else {
+          setProfileFormStatus('Foto guardada localmente. Reintenta más tarde.', 'warning');
+          showNotification('No pudimos sincronizar la foto. Guardado local.', 'warning');
+        }
+      })
+      .catch(error => {
+        console.warn('No se pudo sincronizar la foto de perfil:', error);
+        setProfileFormStatus('Foto guardada localmente. Reintenta más tarde.', 'warning');
+        showNotification('No pudimos sincronizar la foto. Guardado local.', 'warning');
+      });
+  };
+  reader.onerror = function() {
+    showNotification('No pudimos leer la imagen seleccionada.', 'error');
+  };
+  reader.readAsDataURL(file);
+}
+
+
+function setRegistrationStatus(message = '', state = '') {
+  const statusEl = document.getElementById('registrationStatus');
+  if (!statusEl) return;
+  statusEl.textContent = message;
+  statusEl.className = `form-status${state ? ` ${state}` : ''}`;
+}
+
+function getEmailDomain(email = '') {
+  const normalized = String(email || '').trim().toLowerCase();
+  return normalized.includes('@') ? normalized.split('@')[1] : '';
+}
+
+function validateInstitutionalEmail(email = '') {
+  const domain = getEmailDomain(email);
+  return REGISTRATION_ALLOWED_DOMAINS.includes(domain);
+}
+
+async function handleRegistrationSubmit(e) {
+  e.preventDefault();
+  const form = e.target;
+  const formData = new FormData(form);
+  const payload = {
+    method: formData.get('method') || 'codigo',
+    email: formData.get('email')?.trim(),
+    displayName: formData.get('displayName')?.trim(),
+    password: formData.get('password') || '',
+    verificationCode: formData.get('verificationCode')?.trim() || ''
+  };
+
+  if (!validateInstitutionalEmail(payload.email)) {
+    setRegistrationStatus('Solo aceptamos correos institucionales válidos.', 'error');
+    showNotification('Revisa el dominio de tu correo institucional.', 'error');
+    return;
+  }
+
+  setRegistrationStatus('Enviando solicitud...', 'pending');
+
+  const localRecord = {
+    id: Date.now().toString(),
+    ...payload,
+    status: 'local_pending',
+    createdAt: new Date().toISOString()
+  };
+  appData.registrations.unshift(localRecord);
+  registerActivity({
+    icon: 'fas fa-user-plus',
+    title: 'Nuevo preregistro',
+    description: payload.email
+  });
+
+  if (!backendAvailable) {
+    setRegistrationStatus('Guardado localmente. Reintenta cuando vuelva la conexión.', 'warning');
+    showNotification('Sin conexión. Guardamos tu preregistro en este dispositivo.', 'warning');
+    form.reset();
+    document.getElementById('registrationMethod')?.dispatchEvent(new Event('change'));
+    return;
+  }
+
+  try {
+    const response = await apiPost('/registrations', payload);
+    const status = response?.data?.status || 'pending_verification';
+    const debugCode = response?.meta?.debugCode;
+    const baseMessage = status === 'verified'
+      ? 'Cuenta verificada para pruebas internas.'
+      : 'Solicitud registrada. Revisa tu correo para completar la verificación.';
+    const message = debugCode
+      ? `${baseMessage} Código demo: ${debugCode}`
+      : baseMessage;
+    setRegistrationStatus(message, 'success');
+    showNotification('Solicitud de preregistro enviada.', 'success');
+  } catch (error) {
+    console.warn('No se pudo completar el preregistro:', error);
+    setBackendAvailability(false, { helper: 'Fallo al registrar la solicitud.' });
+    setRegistrationStatus('No pudimos contactar al servidor. Guardamos tu solicitud localmente.', 'warning');
+    showNotification('Guardaremos tu preregistro y lo sincronizaremos luego.', 'warning');
+  }
+
+  form.reset();
+  document.getElementById('registrationMethod')?.dispatchEvent(new Event('change'));
+}
+function updateUserProfile(updates = {}, options = {}) {
+  if (!appData.users || !appData.users.length) return null;
+  const nextUser = { ...appData.users[0], ...updates };
+  if (!options.skipTimestamp && !updates.profileUpdatedAt) {
+    nextUser.profileUpdatedAt = new Date().toISOString();
+  }
+  appData.users[0] = nextUser;
+  if (typeof nextUser.emergency_contacts !== 'undefined') {
+    syncEmergencyContactsFromUser(nextUser);
+  }
+  saveProfileToStorage(nextUser);
+  renderProfile();
+  return nextUser;
 }
 
 function renderHomeStats() {
@@ -2432,50 +4281,40 @@ function renderHomeStats() {
   if (tripsEl) {
     tripsEl.textContent = `${stats.tripsToday.toLocaleString('es-CL')} viajes hoy`;
   }
+  renderCommunityPulse();
 }
 
 function calculateAppStats() {
-  const memberSet = new Set();
-  (appData.users || []).forEach(user => {
-    if (user.email) {
-      memberSet.add(user.email.toLowerCase());
-    } else if (user.name) {
-      memberSet.add(user.name.toLowerCase());
-    }
-  });
-
-  (appData.publicTransportTrips || []).forEach(trip => {
-    if (trip.creator) memberSet.add(trip.creator.toLowerCase());
-    const participants = trip.participantsTemplate || [];
-    participants.forEach(p => memberSet.add(p.name?.toLowerCase() || ''));
-  });
-
-  (appData.vehicleTrips || []).forEach(trip => {
-    if (trip.driver) memberSet.add(trip.driver.toLowerCase());
-    const participants = trip.participantsTemplate || [];
-    participants.forEach(p => memberSet.add(p.name?.toLowerCase() || ''));
-  });
-
-  userTrips.active.concat(userTrips.completed).forEach(trip => {
-    if (trip.organizer) memberSet.add(trip.organizer.toLowerCase());
-    (trip.participants || []).forEach(p => memberSet.add(p.name?.toLowerCase() || ''));
-  });
-
-  memberSet.delete('');
-  const membersCount = Math.max(memberSet.size, appData.users?.length || 0);
-
-  const today = new Date().toISOString().split('T')[0];
-  const publicToday = (appData.publicTransportTrips || []).filter(trip => (trip.date || trip.day) === today).length;
-  const vehicleToday = (appData.vehicleTrips || []).filter(trip => (trip.date || trip.day) === today).length;
-  let tripsToday = publicToday + vehicleToday;
-  if (tripsToday === 0) {
-    tripsToday = (appData.publicTransportTrips?.length || 0) + (appData.vehicleTrips?.length || 0);
-  }
+  const membersCount = appData.users?.length || 0;
+  const tripsToday = getPublicTripsCount({ filters: { mode: '' } }) + getVehicleTripsCount({ filters: { type: 'todos' } });
 
   return {
     members: membersCount,
     tripsToday
   };
+}
+
+function renderCommunityPulse() {
+  const card = document.getElementById('communityPulseCard');
+  if (!card) return;
+
+  const activeChats = userTrips.active.filter(trip => trip.hasStarted || trip.isHost).length;
+  const pendingReviews = userTrips.completed.filter(trip => !trip.hostRating).length;
+  const donations = userTrips.completed.filter(trip => Number(trip.donationAmount) > 0).length;
+
+  const activeChatsEl = document.getElementById('pulseActiveChats');
+  const pendingReviewsEl = document.getElementById('pulsePendingReviews');
+  const donationsEl = document.getElementById('pulseDonations');
+  const updatedEl = document.getElementById('communityPulseUpdated');
+
+  if (activeChatsEl) activeChatsEl.textContent = activeChats.toString();
+  if (pendingReviewsEl) pendingReviewsEl.textContent = pendingReviews.toString();
+  if (donationsEl) donationsEl.textContent = donations.toString();
+  if (updatedEl) {
+    updatedEl.textContent = lastBackendSync
+      ? `Actualizado ${formatRelativeTime(lastBackendSync)}`
+      : 'Sincronizando...';
+  }
 }
 
 function startHostedTrip(userTripId) {
@@ -2546,53 +4385,377 @@ function initializeStarRating() {
 function initializeFilters() {
   const filterMode = document.getElementById('filterMode');
   if (filterMode) {
+    publicTripsFilters.mode = filterMode.value || '';
     filterMode.addEventListener('change', function() {
-      filterPublicTrips(this.value);
+      publicTripsFilters.mode = this.value || '';
+      filterPublicTrips(publicTripsFilters.mode);
+    });
+  }
+
+  const refreshTripsBtn = document.getElementById('refreshPublicTripsBtn');
+  if (refreshTripsBtn) {
+    refreshTripsBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      filterPublicTrips(publicTripsFilters.mode);
     });
   }
 
   const vehicleFilter = document.getElementById('vehicleFilter');
   if (vehicleFilter) {
+    vehicleTripsFilters.type = vehicleFilter.value || 'todos';
     vehicleFilter.addEventListener('change', function() {
-      filterVehicleTrips(this.value);
+      vehicleTripsFilters.type = this.value || 'todos';
+      filterVehicleTrips(vehicleTripsFilters.type);
+    });
+  }
+
+  const refreshVehicleBtn = document.getElementById('refreshVehicleTripsBtn');
+  if (refreshVehicleBtn) {
+    refreshVehicleBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      filterVehicleTrips(vehicleTripsFilters.type);
+    });
+  }
+
+  const reportTypeFilter = document.getElementById('reportTypeFilter');
+  if (reportTypeFilter) {
+    safetyReportsFilters.type = reportTypeFilter.value || 'todos';
+    reportTypeFilter.addEventListener('change', function() {
+      safetyReportsFilters.type = this.value || 'todos';
+      filterSafetyReports();
+    });
+  }
+
+  const reportSeverityFilter = document.getElementById('reportSeverityFilter');
+  if (reportSeverityFilter) {
+    safetyReportsFilters.severity = reportSeverityFilter.value || 'todos';
+    reportSeverityFilter.addEventListener('change', function() {
+      safetyReportsFilters.severity = this.value || 'todos';
+      filterSafetyReports();
+    });
+  }
+
+  const refreshReportsBtn = document.getElementById('refreshReportsBtn');
+  if (refreshReportsBtn) {
+    refreshReportsBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      filterSafetyReports();
     });
   }
 }
 
-function filterPublicTrips(mode) {
-  const filteredTrips = mode ? 
-    appData.publicTransportTrips.filter(trip => trip.mode === mode) :
-    appData.publicTransportTrips;
-  renderPublicTrips(filteredTrips);
-}
+async function filterPublicTrips(mode) {
+  publicTripsFilters.mode = mode || '';
 
-function filterVehicleTrips(type) {
-  const normalizedType = normalizeText(type);
-  if (!normalizedType || normalizedType === 'todos') {
-    renderVehicleTrips(appData.vehicleTrips);
+  if (backendAvailable) {
+    const requestId = ++publicTripsRequestId;
+    setPublicTripsLoading(true);
+    try {
+      const response = await fetchPublicTripsFromApi({
+        mode: publicTripsFilters.mode || undefined,
+        limit: PUBLIC_TRIPS_PAGE_SIZE,
+        page: publicTripsFilters.page
+      });
+
+      if (requestId !== publicTripsRequestId) return;
+
+      appData.publicTransportTrips = response.data;
+      publicTripsMeta = {
+        total: response.meta?.total ?? response.data.length,
+        filters: response.meta?.filters || { mode: publicTripsFilters.mode || null },
+        generatedAt: response.meta?.generatedAt || new Date().toISOString()
+      };
+      renderPublicTrips(appData.publicTransportTrips, publicTripsMeta);
+    } catch (error) {
+      if (requestId !== publicTripsRequestId) return;
+      setBackendAvailability(false);
+      console.warn('Fallo al sincronizar viajes públicos:', error);
+      showNotification('No se pudo actualizar desde el servidor. Se mostrarán los datos en local.', 'warning');
+      const localTrips = filterLocalPublicTrips(publicTripsFilters.mode);
+      publicTripsMeta = {
+        total: localTrips.length,
+        filters: { mode: publicTripsFilters.mode || null },
+        generatedAt: new Date().toISOString()
+      };
+      renderPublicTrips(localTrips, publicTripsMeta);
+    } finally {
+      if (requestId === publicTripsRequestId) {
+        setPublicTripsLoading(false);
+      }
+    }
     return;
   }
 
-  const filtered = appData.vehicleTrips.filter(trip => {
-    const vehicleType = normalizeText(trip.vehicle_type || '');
-    return normalizedType === 'automovil'
-      ? vehicleType.includes('automovil')
-      : vehicleType.includes('motocicleta') || vehicleType.includes('moto');
-  });
+  const localTrips = filterLocalPublicTrips(publicTripsFilters.mode);
+  publicTripsMeta = {
+    total: localTrips.length,
+    filters: { mode: publicTripsFilters.mode || null },
+    generatedAt: new Date().toISOString()
+  };
+  renderPublicTrips(localTrips, publicTripsMeta);
+}
 
-  renderVehicleTrips(filtered);
+async function filterVehicleTrips(type) {
+  vehicleTripsFilters.type = type || 'todos';
+
+  if (backendAvailable) {
+    const requestId = ++vehicleTripsRequestId;
+    setVehicleTripsLoading(true);
+    try {
+      const response = await fetchVehicleTripsFromApi({
+        type: vehicleTripsFilters.type !== 'todos' ? vehicleTripsFilters.type : undefined,
+        limit: VEHICLE_TRIPS_PAGE_SIZE,
+        page: vehicleTripsFilters.page
+      });
+
+      if (requestId !== vehicleTripsRequestId) return;
+
+      appData.vehicleTrips = response.data;
+      vehicleTripsMeta = {
+        total: response.meta?.total ?? response.data.length,
+        filters: response.meta?.filters || { type: vehicleTripsFilters.type || 'todos' },
+        generatedAt: response.meta?.generatedAt || new Date().toISOString()
+      };
+      renderVehicleTrips(appData.vehicleTrips, vehicleTripsMeta);
+    } catch (error) {
+      if (requestId !== vehicleTripsRequestId) return;
+      setBackendAvailability(false);
+      console.warn('Fallo al sincronizar viajes en vehículo:', error);
+      showNotification('No se pudo actualizar desde el servidor. Se usarán los datos locales.', 'warning');
+      const localTrips = filterLocalVehicleTrips(vehicleTripsFilters.type);
+      vehicleTripsMeta = {
+        total: localTrips.length,
+        filters: { type: vehicleTripsFilters.type || 'todos' },
+        generatedAt: new Date().toISOString()
+      };
+      renderVehicleTrips(localTrips, vehicleTripsMeta);
+    } finally {
+      if (requestId === vehicleTripsRequestId) {
+        setVehicleTripsLoading(false);
+      }
+    }
+    return;
+  }
+
+  const localTrips = filterLocalVehicleTrips(vehicleTripsFilters.type);
+  vehicleTripsMeta = {
+    total: localTrips.length,
+    filters: { type: vehicleTripsFilters.type || 'todos' },
+    generatedAt: new Date().toISOString()
+  };
+  renderVehicleTrips(localTrips, vehicleTripsMeta);
 }
 
 function refreshPublicTrips() {
-  const filterMode = document.getElementById('filterMode');
-  const current = filterMode ? filterMode.value : '';
-  filterPublicTrips(current);
+  return filterPublicTrips(publicTripsFilters.mode);
 }
 
 function refreshVehicleTrips() {
-  const vehicleFilter = document.getElementById('vehicleFilter');
-  const current = vehicleFilter ? vehicleFilter.value : 'todos';
-  filterVehicleTrips(current);
+  return filterVehicleTrips(vehicleTripsFilters.type);
+}
+
+async function filterSafetyReports() {
+  if (backendAvailable) {
+    const requestId = ++safetyReportsRequestId;
+    setSafetyReportsLoading(true);
+    try {
+      const response = await fetchSafetyReportsFromApi({
+        type: safetyReportsFilters.type,
+        severity: safetyReportsFilters.severity,
+        limit: SAFETY_REPORTS_PAGE_SIZE,
+        page: safetyReportsFilters.page
+      });
+
+      if (requestId !== safetyReportsRequestId) return;
+
+      appData.safetyReports = response.data;
+      safetyReportsMeta = {
+        total: response.meta?.total ?? response.data.length,
+        filters: response.meta?.filters || { type: null, severity: null },
+        generatedAt: response.meta?.generatedAt || new Date().toISOString()
+      };
+      renderSafetyReports();
+    } catch (error) {
+      if (requestId !== safetyReportsRequestId) return;
+      setBackendAvailability(false);
+      console.warn('Fallo al sincronizar reportes de seguridad:', error);
+      showNotification('No se pudo actualizar los reportes. Usando datos locales.', 'warning');
+      const localReports = filterLocalSafetyReports(safetyReportsFilters.type, safetyReportsFilters.severity);
+      safetyReportsMeta = {
+        total: localReports.length,
+        filters: { type: safetyReportsFilters.type, severity: safetyReportsFilters.severity },
+        generatedAt: new Date().toISOString()
+      };
+      appData.safetyReports = localReports;
+      renderSafetyReports();
+    } finally {
+      if (requestId === safetyReportsRequestId) {
+        setSafetyReportsLoading(false);
+      }
+    }
+    return;
+  }
+
+  const localReports = filterLocalSafetyReports(safetyReportsFilters.type, safetyReportsFilters.severity);
+  safetyReportsMeta = {
+    total: localReports.length,
+    filters: { type: safetyReportsFilters.type, severity: safetyReportsFilters.severity },
+    generatedAt: new Date().toISOString()
+  };
+  appData.safetyReports = localReports;
+  renderSafetyReports();
+}
+
+function filterLocalPublicTrips(mode) {
+  if (!mode) {
+    return appData.publicTransportTrips.slice();
+  }
+  return appData.publicTransportTrips.filter(trip => (trip.mode || '').toLowerCase() === mode.toLowerCase());
+}
+
+function filterLocalVehicleTrips(type) {
+  const normalizedType = normalizeText(type);
+  if (!normalizedType || normalizedType === 'todos') {
+    return appData.vehicleTrips.slice();
+  }
+  return appData.vehicleTrips.filter(trip => {
+    const vehicleType = normalizeText(trip.vehicle_type || '');
+    return normalizedType === 'automovil'
+      ? vehicleType.includes('automovil')
+      : vehicleType.includes(normalizedType);
+  });
+}
+
+function filterLocalSafetyReports(type, severity) {
+  const normalizedType = normalizeText(type);
+  const normalizedSeverity = normalizeText(severity);
+  return (appData.safetyReports || []).filter(report => {
+    const matchesType = !normalizedType || normalizedType === 'todos'
+      ? true
+      : (report.type || '').toLowerCase() === normalizedType;
+    const matchesSeverity = !normalizedSeverity || normalizedSeverity === 'todos'
+      ? true
+      : (report.severity || '').toLowerCase() === normalizedSeverity;
+    return matchesType && matchesSeverity;
+  });
+}
+
+function setPublicTripsLoading(isLoading) {
+  publicTripsLoading = isLoading;
+  const refreshBtn = document.getElementById('refreshPublicTripsBtn');
+  if (refreshBtn) {
+    refreshBtn.disabled = isLoading;
+    refreshBtn.classList.toggle('is-loading', isLoading);
+  }
+  updatePublicTripsSummary();
+}
+
+function updatePublicTripsSummary(meta = publicTripsMeta) {
+  const summaryEl = document.getElementById('publicTripsSummary');
+  if (!summaryEl) return;
+
+  if (publicTripsLoading) {
+    summaryEl.textContent = 'Actualizando viajes...';
+    summaryEl.classList.add('is-loading');
+    return;
+  }
+
+  summaryEl.classList.remove('is-loading');
+  const total = getPublicTripsCount(meta);
+  summaryEl.textContent = `${total} viajes activos`;
+}
+
+
+function setVehicleTripsLoading(isLoading) {
+  vehicleTripsLoading = isLoading;
+  const refreshBtn = document.getElementById('refreshVehicleTripsBtn');
+  if (refreshBtn) {
+    refreshBtn.disabled = isLoading;
+    refreshBtn.classList.toggle('is-loading', isLoading);
+  }
+  updateVehicleTripsSummary();
+}
+
+function updateVehicleTripsSummary(meta = vehicleTripsMeta) {
+  const summaryEl = document.getElementById('vehicleTripsSummary');
+  if (!summaryEl) return;
+
+  if (vehicleTripsLoading) {
+    summaryEl.textContent = 'Actualizando viajes...';
+    summaryEl.classList.add('is-loading');
+    return;
+  }
+
+  summaryEl.classList.remove('is-loading');
+  const total = getVehicleTripsCount(meta);
+  summaryEl.textContent = `${total} viajes activos`;
+}
+
+
+function getPublicTripsCount(meta = publicTripsMeta) {
+  const modeFilter = (meta.filters?.mode || publicTripsFilters.mode || '').toLowerCase();
+  return (appData.publicTransportTrips || []).filter(trip => {
+    if (shouldHideTripFromListings(trip)) return false;
+    if (modeFilter && (trip.mode || '').toLowerCase() !== modeFilter) {
+      return false;
+    }
+    return true;
+  }).length;
+}
+
+function getVehicleTripsCount(meta = vehicleTripsMeta) {
+  const typeFilter = (meta.filters?.type || vehicleTripsFilters.type || 'todos').toLowerCase();
+  return (appData.vehicleTrips || []).filter(trip => {
+    if (shouldHideTripFromListings(trip)) return false;
+    if (typeFilter !== 'todos' && (trip.vehicle_type || '').toLowerCase() !== typeFilter) {
+      return false;
+    }
+    return true;
+  }).length;
+}
+
+function getSafetyReportsCount(meta = safetyReportsMeta) {
+  const typeFilter = (meta.filters?.type || safetyReportsFilters.type || 'todos').toLowerCase();
+  const severityFilter = (meta.filters?.severity || safetyReportsFilters.severity || 'todos').toLowerCase();
+  return (appData.safetyReports || []).filter(report => {
+    const matchesType = typeFilter === 'todos' || (report.type || '').toLowerCase() === typeFilter;
+    const matchesSeverity = severityFilter === 'todos' || (report.severity || '').toLowerCase() === severityFilter;
+    return matchesType && matchesSeverity;
+  }).length;
+}
+function setSafetyReportsLoading(isLoading) {
+  safetyReportsLoading = isLoading;
+  const refreshBtn = document.getElementById('refreshReportsBtn');
+  if (refreshBtn) {
+    refreshBtn.disabled = isLoading;
+    refreshBtn.classList.toggle('is-loading', isLoading);
+  }
+  updateSafetyReportsSummary();
+}
+
+function updateSafetyReportsSummary(meta = safetyReportsMeta) {
+  const summaryEl = document.getElementById('safetyReportsSummary');
+  if (!summaryEl) return;
+
+  if (safetyReportsLoading) {
+    summaryEl.textContent = 'Actualizando reportes...';
+    summaryEl.classList.add('is-loading');
+    return;
+  }
+
+  summaryEl.classList.remove('is-loading');
+  const total = getSafetyReportsCount(meta);
+  summaryEl.textContent = `${total} reportes`;
+}
+
+
+function setChatLoading(isLoading) {
+  chatLoading = isLoading;
+  const listEl = document.getElementById('chatMessageList');
+  if (isLoading && listEl) {
+    listEl.innerHTML = '<p class="activity-empty">Cargando mensajes...</p>';
+  }
+  updateChatRefreshButton();
 }
 
 function showNotification(message, type = 'info') {
@@ -2714,6 +4877,8 @@ document.addEventListener('keydown', function(e) {
     const countdownModal = document.getElementById('panicCountdownModal');
     const activeModal = document.getElementById('panicActiveModal');
     const tripDetailModal = document.getElementById('tripDetailModal');
+    const feedbackModal = document.getElementById('tripFeedbackModal');
+    const panicDrawer = document.getElementById('panicHistoryDrawer');
     
     if (sideNav && sideNav.classList.contains('open')) {
       closeMenu();
@@ -2724,6 +4889,10 @@ document.addEventListener('keydown', function(e) {
       dismissPanicModal();
     } else if (tripDetailModal && !tripDetailModal.classList.contains('hidden')) {
       closeTripDetailModal();
+    } else if (feedbackModal && !feedbackModal.classList.contains('hidden')) {
+      closeTripFeedbackModal();
+    } else if (panicDrawer && !panicDrawer.classList.contains('hidden')) {
+      closePanicHistoryDrawer();
     }
   }
 });
@@ -2745,3 +4914,4 @@ window.viewVehicleTrip = viewVehicleTrip;
 window.viewUserTripDetail = viewUserTripDetail;
 window.voteReport = voteReport;
 window.openTripChat = openTripChat;
+window.openTripFeedbackModal = openTripFeedbackModal;
